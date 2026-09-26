@@ -1,0 +1,16 @@
+{
+  "passed": true,
+  "span_names": [
+    "retrieve",
+    "rerank",
+    "generate",
+    "verify",
+    "rag.query"
+  ],
+  "metric_names": [
+    "rag.requests",
+    "rag.latency_ms",
+    "rag.known_cost_usd"
+  ],
+  "scope": "In-memory SDK emission; external OTLP collector not tested"
+}

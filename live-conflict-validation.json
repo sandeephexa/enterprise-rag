@@ -1,0 +1,78 @@
+{
+  "scope": "Local copied index, real configured neural models and provider. First case replays a fixed claim to reproduce the false-positive; remaining cases use live generation.",
+  "cases": [
+    {
+      "case": "replayed_false_conflict",
+      "status": "answered",
+      "answer": "Python is mentioned. [1]",
+      "contexts": 6,
+      "citations": 1,
+      "reasons": [],
+      "stages": {
+        "rewrite": 643.420625012368,
+        "retrieve": 32.739416987169534,
+        "rerank": 106.12241699709557,
+        "generate": 0.10320800356566906,
+        "verify": 345.89900000719354,
+        "conflict_check": 2923.2867500104476
+      },
+      "attempts": 2
+    },
+    {
+      "case": "exact_question_1",
+      "status": "answered",
+      "answer": "Built GenAI proof-of-concepts using Python. [1]\n\nDesigned and delivered scalable enterprise web applications using JavaScript. [2]",
+      "contexts": 6,
+      "citations": 2,
+      "reasons": [],
+      "stages": {
+        "rewrite": 374.6887080196757,
+        "retrieve": 32.0445419929456,
+        "rerank": 134.93066700175405,
+        "generate": 445.2067919773981,
+        "verify": 703.2351669913623,
+        "conflict_check": 2269.1105409758165
+      },
+      "attempts": 3
+    },
+    {
+      "case": "exact_question_2",
+      "status": "answered",
+      "answer": "Built GenAI proof-of-concepts using Python. [1]\n\nDesigned and delivered scalable enterprise web applications using JavaScript. [2]",
+      "contexts": 6,
+      "citations": 2,
+      "reasons": [],
+      "stages": {
+        "rewrite": 407.3561670084018,
+        "retrieve": 19.3986669764854,
+        "rerank": 109.91895900224335,
+        "generate": 374.97433301177807,
+        "verify": 843.3143330039456,
+        "conflict_check": 354.0773330023512
+      },
+      "attempts": 3
+    },
+    {
+      "case": "paraphrase",
+      "status": "answered",
+      "answer": "Designed and delivered scalable enterprise web applications using JavaScript. [1]\n\nBuilt GenAI proof-of-concepts using Python. [2]",
+      "contexts": 4,
+      "citations": 2,
+      "reasons": [],
+      "stages": {
+        "rewrite": 1881.3511669868603,
+        "retrieve": 32.66620900831185,
+        "rerank": 127.85312501364388,
+        "generate": 4219.516458018916,
+        "verify": 464.56583397230133,
+        "conflict_check": 2200.3815829812083
+      },
+      "attempts": 3
+    }
+  ],
+  "synthetic_provider_check": {
+    "different_project_language": "compatible",
+    "explicit_never_used_python": "contradiction"
+  },
+  "backend_tests_passed": 47
+}

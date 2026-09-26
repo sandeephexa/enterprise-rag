@@ -1,0 +1,113 @@
+{
+  "mode": "demo",
+  "scope": "Isolated real HTTP API; no paid model calls",
+  "passed": true,
+  "check_count": 26,
+  "checks": [
+    {
+      "name": "unauthenticated query => 401",
+      "passed": true
+    },
+    {
+      "name": "query-only identity cannot ingest => 403",
+      "passed": true
+    },
+    {
+      "name": "query-invalid => 422",
+      "passed": true
+    },
+    {
+      "name": "query-tenant-spoof => 422",
+      "passed": true
+    },
+    {
+      "name": "query-injection => 400",
+      "passed": true
+    },
+    {
+      "name": "oversized body => 413",
+      "passed": true
+    },
+    {
+      "name": "injected document => 400",
+      "passed": true
+    },
+    {
+      "name": "empty-index abstention",
+      "passed": true
+    },
+    {
+      "name": "three baseline chunks ingested",
+      "passed": true
+    },
+    {
+      "name": "idempotent reingestion",
+      "passed": true
+    },
+    {
+      "name": "answerable query released",
+      "passed": true
+    },
+    {
+      "name": "exact source offsets",
+      "passed": true
+    },
+    {
+      "name": "every claim has citation",
+      "passed": true
+    },
+    {
+      "name": "trace propagation",
+      "passed": true
+    },
+    {
+      "name": "unknown query abstains",
+      "passed": true
+    },
+    {
+      "name": "group ACL filters before retrieval",
+      "passed": true
+    },
+    {
+      "name": "authorized HR identity retrieves fixture",
+      "passed": true
+    },
+    {
+      "name": "tenant isolation with same document ID",
+      "passed": true
+    },
+    {
+      "name": "high-risk review withholds claims",
+      "passed": true
+    },
+    {
+      "name": "review persisted",
+      "passed": true
+    },
+    {
+      "name": "review decision accepted",
+      "passed": true
+    },
+    {
+      "name": "duplicate review decision rejected",
+      "passed": true
+    },
+    {
+      "name": "replacement source/version used",
+      "passed": true
+    },
+    {
+      "name": "delete removes tenant document",
+      "passed": true
+    },
+    {
+      "name": "deleted source absent from retrieval",
+      "passed": true
+    },
+    {
+      "name": "other tenant survives deletion",
+      "passed": true
+    }
+  ],
+  "error": null
+}

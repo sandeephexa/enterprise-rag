@@ -1,0 +1,32 @@
+{
+  "passed": true,
+  "embedding_shape": [
+    3,
+    384
+  ],
+  "embedding_cosines": [
+    0.7160123586654663,
+    -0.004504671320319176
+  ],
+  "rerank_scores": [
+    0.989325761795044,
+    1.2519556548795663e-05
+  ],
+  "nli_entailment_contradiction": [
+    [
+      0.989769458770752,
+      0.000830488046631217
+    ],
+    [
+      0.0015201703645288944,
+      0.9974414110183716
+    ]
+  ],
+  "load_and_run_seconds": 17.22952249998343,
+  "revisions": {
+    "embedding": "1110a243fdf4706b3f48f1d95db1a4f5529b4d41",
+    "reranker": "233902d25c440f23af6f7d6e94d2946bac0bee0a",
+    "nli": "fa2804872c3b4bd748f38c0185cc85775361e735"
+  },
+  "scope": "Neural smoke only; not a quality benchmark or live generator test"
+}

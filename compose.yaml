@@ -1,0 +1,29 @@
+services:
+  rag:
+    build: .
+    env_file: .env
+    environment:
+      RAG_DATABASE_PATH: /app/data/rag.sqlite3
+      RAG_OTLP_ENDPOINT: http://collector:4318
+    ports: ["127.0.0.1:8000:8000"]
+    volumes: ["rag-data:/app/data"]
+    depends_on: [collector]
+    restart: unless-stopped
+  collector:
+    image: otel/opentelemetry-collector-contrib:0.123.0
+    command: ["--config=/etc/otel/config.yaml"]
+    volumes: ["./deploy/otel-collector.yaml:/etc/otel/config.yaml:ro"]
+    ports: ["127.0.0.1:4318:4318"]
+    depends_on: [jaeger]
+  jaeger:
+    image: jaegertracing/all-in-one:1.66.0
+    environment:
+      COLLECTOR_OTLP_ENABLED: "true"
+    ports: ["127.0.0.1:16686:16686"]
+  prometheus:
+    image: prom/prometheus:v3.2.1
+    volumes: ["./deploy/prometheus.yaml:/etc/prometheus/prometheus.yml:ro"]
+    ports: ["127.0.0.1:9090:9090"]
+    depends_on: [collector]
+volumes:
+  rag-data:

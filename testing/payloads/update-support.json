@@ -1,0 +1,13 @@
+{
+  "documents": [
+    {
+      "id": "support",
+      "title": "Updated enterprise support policy",
+      "source": "urn:acme:support:v2",
+      "groups": [
+        "staff"
+      ],
+      "text": "Enterprise support is available 8 hours a day. Tickets receive a response within 4 hours."
+    }
+  ]
+}

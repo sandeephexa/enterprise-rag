@@ -1,0 +1,76 @@
+{
+  "passed": true,
+  "http_status": 200,
+  "indexed_chunks": 3,
+  "citation_count": 1,
+  "trace_propagation_verified": true,
+  "answer": {
+    "request_id": "542dcd838125451b972a75d527cc173a",
+    "trace_id": "fd23dfb8e170606310ee5ebf7bfce5d2",
+    "status": "answered",
+    "answer": "Enterprise support is available 24 hours a day. Tickets receive a response within 2 hours. [1]",
+    "claims": [
+      {
+        "text": "Enterprise support is available 24 hours a day. Tickets receive a response within 2 hours.",
+        "evidence": [
+          {
+            "chunk_id": "e11c4410887a8f1abc772dd6e4f3c7f1af79b54cdf3ed9f7e4b1bbbd76d899f3",
+            "quote": "Enterprise support is available 24 hours a day. Tickets receive a response within 2 hours."
+          }
+        ]
+      }
+    ],
+    "citations": [
+      {
+        "number": 1,
+        "claim_index": 0,
+        "chunk_id": "e11c4410887a8f1abc772dd6e4f3c7f1af79b54cdf3ed9f7e4b1bbbd76d899f3",
+        "document_id": "support",
+        "version": "5463a36e7a53efea059827f939f1b380192d2d2857a034a76a3afef31f71822b",
+        "source": "urn:acme:support:v1",
+        "title": "Enterprise support policy",
+        "quote": "Enterprise support is available 24 hours a day. Tickets receive a response within 2 hours.",
+        "start": 0,
+        "end": 90
+      }
+    ],
+    "contexts": [
+      {
+        "chunk": {
+          "id": "e11c4410887a8f1abc772dd6e4f3c7f1af79b54cdf3ed9f7e4b1bbbd76d899f3",
+          "document_id": "support",
+          "version": "5463a36e7a53efea059827f939f1b380192d2d2857a034a76a3afef31f71822b",
+          "source": "urn:acme:support:v1",
+          "title": "Enterprise support policy",
+          "text": "Enterprise support is available 24 hours a day. Tickets receive a response within 2 hours.",
+          "start": 0,
+          "end": 90,
+          "groups": [
+            "staff"
+          ]
+        },
+        "fusion_score": 0.03278688524590164,
+        "rerank_score": 1.0
+      }
+    ],
+    "review_reasons": [],
+    "faithfulness": 1.0,
+    "usage": {
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "known_cost_usd": 0.0,
+      "reserved_cost_usd": 0.0,
+      "uncertain_attempts": 0,
+      "attempts": 0
+    },
+    "latency_ms": 3.6145829944871366,
+    "stage_ms": {
+      "retrieve": 2.7030839992221445,
+      "rerank": 0.2209169906564057,
+      "generate": 0.0483339827042073,
+      "verify": 0.20058301743119955
+    },
+    "mode": "demo"
+  },
+  "scope": "Actual Uvicorn HTTP server with demo backends; no paid model call"
+}

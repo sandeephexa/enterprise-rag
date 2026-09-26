@@ -1,0 +1,13 @@
+{
+  "documents": [
+    {
+      "id": "hr-private",
+      "title": "Synthetic HR allocation",
+      "source": "urn:fixture:hr",
+      "groups": [
+        "hr"
+      ],
+      "text": "JADE retirement allocation is 450 units. This is synthetic restricted test data."
+    }
+  ]
+}

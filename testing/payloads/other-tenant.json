@@ -1,0 +1,13 @@
+{
+  "documents": [
+    {
+      "id": "support",
+      "title": "Other tenant support",
+      "source": "urn:fixture:other",
+      "groups": [
+        "staff"
+      ],
+      "text": "Support is available 9 hours a day. The other tenant marker is ORCHID."
+    }
+  ]
+}
