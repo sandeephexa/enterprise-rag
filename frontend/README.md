@@ -1,6 +1,6 @@
 # Evidence — RAG workbench
 
-A responsive React 19 + TypeScript + Tailwind CSS 4 application that calls the Python service in this repository. Vite handles development and builds. Fetch handles requests; Zod validates API responses at runtime. Nothing in the interface fabricates answers, scores, costs or review records.
+A responsive React 19 + TypeScript + Tailwind CSS 4 application that calls the Python service in this repository. Vite handles development and builds. Fetch handles JSON requests; XMLHttpRequest measures file upload progress; Zod validates API responses at runtime. Nothing in the interface fabricates answers, scores, costs or review records.
 
 ## Start the application
 
@@ -129,3 +129,15 @@ location / {
 If using a different API origin, configure its CORS allowlist deliberately and build with the intended `VITE_API_BASE_URL`. The UI renders model/source text as escaped React text, never raw HTML. External source links are limited to HTTPS. Review decisions still require server authorization; hiding controls is not an authorization mechanism.
 
 Implementation references: [Tailwind's Vite integration](https://tailwindcss.com/docs/installation/using-vite), [Vite development proxy](https://vite.dev/config/server-options#server-proxy), and [React useReducer](https://react.dev/reference/react/useReducer).
+
+## Direct file uploads
+
+Documents now opens the File upload tab. Select or drop PDF, Markdown, XLSX, DOCX, CSV or TXT files, choose authorized access groups and upload. Each file has its own progress, parse/index state, errors, warnings and retry result. Paste text and JSON batch remain available. Default limits are fetched from the backend; restart an older backend to expose `/ingest/formats` and `/ingest/file`.
+
+See [the complete upload guide](../FILE_UPLOADS.md) for server limits, format-specific extraction, identity/provenance, cancellation behavior, samples and tested rollback cases. The source client is `src/api/client.ts`, upload schemas are in `src/api/uploads.ts`, and the UI is `src/components/FileUploadPanel.tsx`.
+
+
+Verified-answer reuse is reported in the Execution inspector when `cache_hit` is true. Timings and usage belong to the current request; cache hits show zero new model calls. Backend defaults and cache invalidation are documented in [the runbook](../RUNBOOK.md#latency-controls).
+
+
+The Source sentences badge means the live model selected evidence and the server copied exact source wording into the answer. The inspector retains initial verification failure codes. The connection banner identifies an older backend using the readiness pipeline revision; restart FastAPI and click Check again to confirm the update is active.

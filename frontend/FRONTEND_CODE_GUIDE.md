@@ -1,6 +1,6 @@
 # Evidence — RAG workbench
 
-A responsive React 19 + TypeScript + Tailwind CSS 4 application that calls the Python service in this repository. Vite handles development and builds. Fetch handles requests; Zod validates API responses at runtime. Nothing in the interface fabricates answers, scores, costs or review records.
+A responsive React 19 + TypeScript + Tailwind CSS 4 application that calls the Python service in this repository. Vite handles development and builds. Fetch handles JSON requests; XMLHttpRequest measures file upload progress; Zod validates API responses at runtime. Nothing in the interface fabricates answers, scores, costs or review records.
 
 ## Start the application
 
@@ -130,6 +130,18 @@ If using a different API origin, configure its CORS allowlist deliberately and b
 
 Implementation references: [Tailwind's Vite integration](https://tailwindcss.com/docs/installation/using-vite), [Vite development proxy](https://vite.dev/config/server-options#server-proxy), and [React useReducer](https://react.dev/reference/react/useReducer).
 
+## Direct file uploads
+
+Documents now opens the File upload tab. Select or drop PDF, Markdown, XLSX, DOCX, CSV or TXT files, choose authorized access groups and upload. Each file has its own progress, parse/index state, errors, warnings and retry result. Paste text and JSON batch remain available. Default limits are fetched from the backend; restart an older backend to expose `/ingest/formats` and `/ingest/file`.
+
+See [the complete upload guide](../FILE_UPLOADS.md) for server limits, format-specific extraction, identity/provenance, cancellation behavior, samples and tested rollback cases. The source client is `src/api/client.ts`, upload schemas are in `src/api/uploads.ts`, and the UI is `src/components/FileUploadPanel.tsx`.
+
+
+Verified-answer reuse is reported in the Execution inspector when `cache_hit` is true. Timings and usage belong to the current request; cache hits show zero new model calls. Backend defaults and cache invalidation are documented in [the runbook](../RUNBOOK.md#latency-controls).
+
+
+The Source sentences badge means the live model selected evidence and the server copied exact source wording into the answer. The inspector retains initial verification failure codes. The connection banner identifies an older backend using the readiness pipeline revision; restart FastAPI and click Check again to confirm the update is active.
+
 
 # Complete implementation code
 
@@ -153,6 +165,9 @@ export const HitSchema = z.object({
   fusion_score: number, rerank_score: number.nullable(),
 });
 export const AnswerSchema = z.object({
+  cache_hit: z.boolean().optional(),
+  answer_style: z.enum(['extractive', 'synthesis']).optional(),
+  initial_verification_reasons: z.array(z.string()).optional(),
   request_id: z.string(), trace_id: z.string(), status: z.enum(['answered', 'abstained', 'review']),
   answer: z.string(), claims: z.array(ClaimSchema), citations: z.array(CitationSchema),
   contexts: z.array(HitSchema), review_reasons: z.array(z.string()), faithfulness: number.nullable(),
@@ -182,7 +197,36 @@ export type Citation = z.infer<typeof CitationSchema>;
 export type Hit = z.infer<typeof HitSchema>;
 export type Review = z.infer<typeof ReviewSchema>;
 export type IngestBatch = z.infer<typeof IngestSchema>;
-export type Health = { status: string; mode: 'live' | 'demo' };
+export const PIPELINE_REVISION = 'source-selection-v1';
+export type Health = { status: string; mode: 'live' | 'demo'; pipeline_revision?: string; answer_style?: 'extractive' | 'synthesis' };
+
+```
+
+## `src/api/uploads.ts`
+
+```typescript
+import { z } from 'zod';
+
+export const UploadLimitsSchema = z.object({
+  extensions: z.array(z.string()), max_file_bytes: z.number().positive(),
+  max_extracted_chars: z.number().positive(), max_pdf_pages: z.number().positive(),
+  max_excel_sheets: z.number().positive(), parse_timeout_s: z.number().positive(),
+});
+export const UploadResultSchema = z.object({
+  document_id: z.string(), source: z.string(), indexed_chunks: z.number().int().nonnegative(),
+  extracted_characters: z.number().int().nonnegative(), warnings: z.array(z.string()),
+});
+export type UploadLimits = z.infer<typeof UploadLimitsSchema>;
+export type UploadResult = z.infer<typeof UploadResultSchema>;
+
+export function validateFile(file: Pick<File, 'name' | 'size'>, limits: UploadLimits): string | null {
+  const extension = '.' + file.name.split('.').pop()?.toLowerCase();
+  if (!limits.extensions.includes(extension)) return `Unsupported format. Choose ${limits.extensions.join(', ')}.`;
+  if (!file.size) return 'The file is empty.';
+  if (file.size > limits.max_file_bytes) return `File exceeds ${(limits.max_file_bytes / 1048576).toFixed(0)} MiB.`;
+  if (file.name.length > 255 || /[\u0000-\u001f]/.test(file.name)) return 'File name is invalid or too long.';
+  return null;
+}
 
 ```
 
@@ -190,6 +234,7 @@ export type Health = { status: string; mode: 'live' | 'demo' };
 
 ```typescript
 import { z } from 'zod';
+import { UploadLimitsSchema, UploadResultSchema, type UploadResult } from './uploads';
 import { AnswerSchema, ReviewSchema, IngestSchema, type IngestBatch } from './schemas';
 
 export const API_BASE = (import.meta.env.VITE_API_BASE_URL || '/api').replace(/\/$/, '');
@@ -255,12 +300,73 @@ export class ApiClient {
     return this.request('/query', AnswerSchema, { method: 'POST', body: { text }, signal });
   }
   health(signal?: AbortSignal) {
-    return this.request('/health/ready', z.object({ status: z.string(), mode: z.enum(['live', 'demo']) }), { signal, timeout: 5000 });
+    return this.request('/health/ready', z.object({ status: z.string(), mode: z.enum(['live', 'demo']), pipeline_revision: z.string().optional(), answer_style: z.enum(['extractive', 'synthesis']).optional() }), { signal, timeout: 5000 });
   }
   ingest(batch: IngestBatch, signal?: AbortSignal) {
     const body = IngestSchema.parse(batch);
     if (new TextEncoder().encode(JSON.stringify(body)).byteLength > 1_000_000) throw new ApiError('Batch exceeds the default 1 MB body limit.');
     return this.request('/ingest', z.object({ indexed_chunks: z.number().int().nonnegative() }), { method: 'POST', body, signal, timeout: 130000 });
+  }
+  uploadLimits(signal?: AbortSignal) {
+    return this.request('/ingest/formats', UploadLimitsSchema, { signal, timeout: 5000 });
+  }
+
+  /** XHR supplies real byte progress; 100% means server processing, not indexed. */
+  uploadFile(file: File, groups: string[], documentId: string, onProgress: (percent: number) => void, signal: AbortSignal): Promise<UploadResult> {
+    return new Promise((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+      const abort = () => xhr.abort();
+      let settled = false;
+      const finish = (result?: UploadResult, error?: Error) => {
+        if (settled) return;
+        settled = true;
+        signal.removeEventListener('abort', abort);
+        if (error) reject(error); else resolve(result!);
+      };
+      xhr.open('POST', `${this.base}/ingest/file`);
+      xhr.timeout = 190000;
+      if (this.token) xhr.setRequestHeader('Authorization', `Bearer ${this.token}`);
+      xhr.upload.onprogress = event => {
+        if (event.lengthComputable) onProgress(Math.min(100, Math.round(event.loaded / event.total * 100)));
+      };
+      xhr.upload.onload = () => onProgress(100);
+      xhr.onerror = () => finish(undefined, new ApiError('Upload connection failed. Check the backend and proxy.'));
+      xhr.onabort = () => finish(undefined, new DOMException('Upload cancelled. Indexing may already have completed; retrying the same document ID safely replaces it.', 'AbortError'));
+      xhr.ontimeout = () => finish(undefined, new ApiError('Upload timed out. Indexing may still finish; retry with the same document ID.'));
+      xhr.onload = () => {
+        let data: unknown;
+        try { data = JSON.parse(xhr.responseText); } catch { finish(undefined, new ApiError('The upload API returned an invalid response. Restart the updated backend.')); return; }
+        if (xhr.status < 200 || xhr.status >= 300) {
+          const detail = z.object({ detail: z.object({ code: z.string(), message: z.string().max(500) }) }).safeParse(data);
+          const messages: Record<number, string> = {
+            400: 'Malformed upload or content rejected by the safety policy.',
+            401: 'Authentication failed. Update your API token.',
+            403: 'Your identity cannot ingest files into these groups.',
+            404: 'File uploads are unavailable. Restart the updated backend.',
+            408: 'Upload or parsing timed out. Split or simplify the file.',
+            413: 'The file or its extracted contents exceed the server limits.',
+            415: 'Unsupported file format. Use PDF, MD, XLSX, DOCX, CSV or TXT.',
+            422: 'The file or metadata could not be processed.',
+            429: 'Rate limit reached. Wait a minute before retrying.',
+            503: 'The service is busy or indexing failed. Retry shortly.',
+          };
+          // React renders this as text, never as HTML.
+          finish(undefined, new ApiError(detail.success ? detail.data.detail.message : messages[xhr.status] ?? `Upload failed (${xhr.status}).`, xhr.status));
+          return;
+        }
+        const parsed = UploadResultSchema.safeParse(data);
+        if (!parsed.success) finish(undefined, new ApiError('Upload response does not match this workbench version.'));
+        else finish(parsed.data);
+      };
+      if (signal.aborted) { finish(undefined, new DOMException('Cancelled', 'AbortError')); return; }
+      signal.addEventListener('abort', abort, { once: true });
+      const body = new FormData();
+      body.append('file', file);
+      body.append('groups', JSON.stringify(groups));
+      if (documentId.trim()) body.append('document_id', documentId.trim());
+      // The browser supplies the multipart boundary; do not set Content-Type.
+      xhr.send(body);
+    });
   }
   reviews(signal?: AbortSignal) { return this.request('/reviews', z.array(ReviewSchema), { signal }); }
   decide(id: string, decision: 'approve' | 'reject', note: string, signal?: AbortSignal) {
@@ -359,6 +465,7 @@ export function useRequest<T>() {
 ## `src/App.tsx`
 
 ```tsx
+import { PIPELINE_REVISION } from './api/schemas';
 import { useEffect, useMemo, useState } from 'react';
 import { ArrowRight, FlaskConical, FolderInput, KeyRound, Moon, ShieldCheck, Sun, Terminal, Unplug } from 'lucide-react';
 import { ApiClient } from './api/client';
@@ -391,6 +498,7 @@ function Workspace({ token, onConnect, theme, toggleTheme }: { token: string; on
       <div className="nav-bottom"><div className="rounded-xl border border-line p-4"><Terminal size={17} className="mb-3 text-accent" /><p className="text-sm font-medium">Your pipeline. In focus.</p><p className="mt-2 text-xs leading-5 muted">Inspect retrieval, trace claims, and review what needs a human.</p></div><button className="theme-toggle" onClick={toggleTheme} aria-label={`Switch to ${theme === 'dark' ? 'light' : 'dark'} mode`}>{theme === 'dark' ? <Sun size={16} /> : <Moon size={16} />}<span>{theme === 'dark' ? 'Light appearance' : 'Dark appearance'}</span></button></div>
     </aside>
     <div className="workspace-main"><header className="topbar"><div className="flex items-center gap-2 text-sm"><span className="muted hidden sm:inline">Workspace</span><ArrowRight size={12} className="muted hidden sm:inline" /><span>{title}</span></div><div className="flex items-center gap-3"><span className="hidden sm:inline-flex">{health.loading ? <Badge>Checking API…</Badge> : health.error ? <Badge tone="warning">API unavailable</Badge> : health.data ? <Badge tone="good">{health.data.mode === 'demo' ? 'Demo API ready' : 'Live API ready'}</Badge> : null}</span><Button onClick={onConnect}><KeyRound size={14} />{token ? 'Connection' : 'Set API token'}</Button><button className="mobile-theme" onClick={toggleTheme} aria-label="Toggle appearance">{theme === 'dark' ? <Sun size={17} /> : <Moon size={17} />}</button></div></header>
+      {health.data && health.data.pipeline_revision !== PIPELINE_REVISION && <div className="connection-banner" role="status"><Unplug size={16} /><span>The backend is running an older answer pipeline. Restart FastAPI to load the update, then check again.</span><button onClick={() => void health.execute(signal => api.health(signal))} className="underline underline-offset-4 ml-auto">Check again</button></div>}
       {health.error && <div className="connection-banner"><Unplug size={16} /><span>Backend unavailable. Start FastAPI or check your proxy target.</span><button onClick={() => void health.execute(signal => api.health(signal))} className="underline underline-offset-4 ml-auto">Retry</button></div>}
       <main id="main-content" tabIndex={-1} className={`main-content ${view === 'playground' ? 'playground-layout' : ''}`}>
         <div hidden={view !== 'playground'} className="min-w-0"><Playground state={playground} authenticated={!!token} onConnect={onConnect} onCitation={(id, selectedCitation) => { playground.select(id); setCitation({ runId: id, citation: selectedCitation }); }} /></div>
@@ -457,7 +565,7 @@ export function Playground({ state, authenticated, onConnect, onCitation }: {
       <div className="run-question"><UserRound size={17} className="shrink-0 text-accent" /><p className="min-w-0 flex-1 whitespace-pre-wrap break-words">{run.question}</p><span className="font-mono text-xs muted">{String(index + 1).padStart(2, '0')}</span></div>
       <div className="p-5 sm:p-6">
         {run.status === 'pending' ? <div role="status"><div className="mb-4 flex items-center gap-2 text-sm muted"><span className="loading-dot" />Retrieving evidence and verifying the answer…</div><Skeleton className="mb-2 h-3 w-full" /><Skeleton className="mb-2 h-3 w-11/12" /><Skeleton className="h-3 w-2/3" /></div> : run.status === 'error' ? <ErrorNotice message={run.error} /> : run.status === 'cancelled' ? <p className="text-sm muted">Stopped waiting. The backend may still finish this request.</p> : run.answer && <>
-          <div className="mb-5 flex flex-wrap items-center justify-between gap-2"><div className="flex flex-wrap items-center gap-2"><span className="font-semibold">Evidence</span><Badge tone={run.answer.status === 'answered' ? 'good' : 'warning'}>{run.answer.status === 'answered' ? 'Grounding passed' : run.answer.status === 'review' ? 'Human review' : 'Abstained'}</Badge>{run.answer.mode === 'demo' && <Badge>Demo · exact extract</Badge>}</div><span className="flex items-center gap-1 text-xs muted"><Clock3 size={12} />{duration(run.answer.latency_ms)}</span></div>
+          <div className="mb-5 flex flex-wrap items-center justify-between gap-2"><div className="flex flex-wrap items-center gap-2"><span className="font-semibold">Evidence</span><Badge tone={run.answer.status === 'answered' ? 'good' : 'warning'}>{run.answer.status === 'answered' ? 'Grounding passed' : run.answer.status === 'review' ? 'Human review' : 'Abstained'}</Badge>{run.answer.mode === 'live' && run.answer.answer_style === 'extractive' && <Badge>Source sentences</Badge>}{run.answer.mode === 'demo' && <Badge>Demo · exact extract</Badge>}</div><span className="flex items-center gap-1 text-xs muted"><Clock3 size={12} />{duration(run.answer.latency_ms)}</span></div>
           {run.answer.claims.length ? <div className="space-y-4">{run.answer.claims.map((claim, claimIndex) => <div key={claimIndex} className="claim"><span className="claim-number" title={`Claim ${claimIndex + 1}`}>C{claimIndex + 1}</span><p className="min-w-0 whitespace-pre-wrap leading-7 break-words">{claim.text}{' '}{run.answer!.citations.filter(c => c.claim_index === claimIndex).map(citation => <button key={citation.number} className="citation" aria-label={`Inspect citation ${citation.number} for claim ${claimIndex + 1}`} onClick={() => onCitation(run.id, citation)}>[{citation.number}]</button>)}</p></div>)}</div> : <p className="leading-7">{run.answer.answer}</p>}
           {run.answer.review_reasons.length > 0 && <div className="mt-4 flex flex-wrap gap-2">{run.answer.review_reasons.map(reason => <Badge key={reason} tone="warning">{reason.replaceAll('_', ' ')}</Badge>)}</div>}
           <div className="mt-5 flex flex-wrap items-center justify-between gap-3 border-t border-line pt-4"><span className="text-xs muted">{run.answer.contexts.length} contexts · {run.answer.claims.length} claims · {run.answer.citations.length} citations</span><Button variant="ghost" onClick={() => state.select(run.id)}>Inspect run <ChevronRight size={14} /></Button></div>
@@ -511,8 +619,11 @@ export function Inspector({ answer, pending, citation }: { answer?: Answer; pend
       })}
     </div> : <div className="p-5 space-y-6" role="region" aria-label="Execution metrics">
       <div className="grid grid-cols-2 gap-3"><div className="metric"><span>Latency</span><strong>{duration(answer.latency_ms)}</strong></div><div className="metric"><span>Faithfulness</span><strong>{answer.faithfulness === null ? 'Not scored' : answer.faithfulness.toFixed(2)}</strong></div></div>
-      {answer.mode === 'demo' && <p className="text-xs leading-5 muted">Demo faithfulness checks exact extracts. These results do not measure live model quality.</p>}
-      <section><h3 className="label mb-4">STAGE LATENCY</h3><div className="space-y-4">{stages.map(([name, ms]) => <div key={name}><div className="mb-2 flex justify-between text-xs"><span className="capitalize">{name}</span><span className="muted tabular-nums">{duration(ms)}</span></div><div className="stage-track"><div style={{ width: `${Math.max(1, ms / totalStages * 100)}%` }} /></div></div>)}</div><p className="mt-3 text-xs muted">Share of measured stage time; excludes other overhead.</p></section>
+      {answer.cache_hit && <p className="text-xs leading-5 text-accent">Verified answer reused from cache. Latency and usage describe this request; no model calls were made. Citations refer to the unchanged indexed sources.</p>}
+      {answer.answer_style === 'extractive' && <p className="text-xs leading-5 muted">The model selected relevant source sentences. Answer wording comes directly from the document; citations and grounding checks still apply.</p>}
+      {!!answer.initial_verification_reasons?.length && <p className="text-xs leading-5 muted">Initial verification: {answer.initial_verification_reasons.map(reason => reason.replaceAll('_', ' ')).join(', ')}. See the final outcome for the result after recovery.</p>}
+      {answer.mode === 'demo'   && <p className="text-xs leading-5 muted">Demo faithfulness checks exact extracts. These results do not measure live model quality.</p>}
+      <section><h3 className="label mb-4">STAGE LATENCY</h3><div className="space-y-4">{stages.map(([name, ms]) => <div key={name}><div className="mb-2 flex justify-between text-xs"><span className="capitalize">{name.replaceAll('_', ' ')}</span><span className="muted tabular-nums">{duration(ms)}</span></div><div className="stage-track"><div style={{ width: `${Math.max(1, ms / totalStages * 100)}%` }} /></div></div>)}</div><p className="mt-3 text-xs muted">Share of measured stage time; excludes other overhead.</p></section>
       <section><h3 className="label mb-3">USAGE & COST</h3><dl className="metric-list"><div><dt>Input tokens</dt><dd>{answer.usage.input_tokens.toLocaleString()}</dd></div><div><dt>Output tokens</dt><dd>{answer.usage.output_tokens.toLocaleString()}</dd></div><div><dt>Provider attempts</dt><dd>{answer.usage.attempts}</dd></div><div><dt>Known model cost</dt><dd>{usd(answer.usage.known_cost_usd)}</dd></div><div><dt>Reserved uncertain cost</dt><dd>{usd(answer.usage.reserved_cost_usd)}</dd></div><div><dt>Uncertain attempts</dt><dd>{answer.usage.uncertain_attempts}</dd></div></dl><p className="mt-3 text-xs leading-5 muted">Known cost excludes local compute. Reservations are estimates, not confirmed charges.</p></section>
       <section className="border-t border-line pt-4"><h3 className="label mb-3 flex items-center gap-2"><Fingerprint size={15} /> TRACE</h3>{[['Trace ID', answer.trace_id], ['Request ID', answer.request_id]].map(([label, value]) => <div className="mb-3" key={label}><div className="flex items-center justify-between text-xs muted"><span>{label}</span><CopyButton value={value} label={`Copy ${label}`} /></div><p className="font-mono text-xs break-all">{value}</p></div>)}</section>
     </div>}
@@ -524,6 +635,7 @@ export function Inspector({ answer, pending, citation }: { answer?: Answer; pend
 ## `src/components/IngestionPanel.tsx`
 
 ```tsx
+import { FileUploadPanel } from './FileUploadPanel';
 import { useRef, useState } from 'react';
 import { CheckCircle2, FileJson2, FilePlus2, Upload } from 'lucide-react';
 import type { ApiClient } from '../api/client';
@@ -533,7 +645,8 @@ import { SAMPLE_DOCUMENTS } from '../samples';
 import { Badge, Button, ErrorNotice } from './ui';
 
 export function IngestionPanel({ api, authenticated, onConnect }: { api: ApiClient; authenticated: boolean; onConnect: () => void }) {
-  const [mode, setMode] = useState<'form' | 'json'>('form');
+  const [mode, setMode] = useState<'form' | 'json' | 'files'>('files');
+  const [filesBusy, setFilesBusy] = useState(false);
   const [fields, setFields] = useState({ id: '', title: '', source: '', groups: 'staff', text: '' });
   const [json, setJson] = useState('');
   const [validation, setValidation] = useState<string | null>(null);
@@ -555,10 +668,11 @@ export function IngestionPanel({ api, authenticated, onConnect }: { api: ApiClie
     } catch { setValidation('Invalid JSON. Provide an object containing a documents array.'); }
   };
   return <section className="max-w-4xl">
-    <div className="section-heading"><div><div className="eyebrow">BUILD YOUR TEST CORPUS</div><h1>Document ingestion</h1><p className="muted mt-2">Give your next query something to work with.</p></div><Badge tone="accent">POST /ingest</Badge></div>
+    <div className="section-heading"><div><div className="eyebrow">BUILD YOUR TEST CORPUS</div><h1>Document ingestion</h1><p className="muted mt-2">Give your next query something to work with.</p></div><Badge tone="accent">{mode === 'files' ? 'POST /ingest/file' : 'POST /ingest'}</Badge></div>
     <div className="panel">
-      <div className="flex flex-wrap items-center justify-between gap-3 border-b border-line p-5"><div className="segmented" aria-label="Input mode">{(['form', 'json'] as const).map(value => <button key={value} aria-pressed={mode === value} className={mode === value ? 'active' : ''} onClick={() => { setMode(value); setValidation(null); setResult(null); }}>{value === 'form' ? 'Single document' : 'JSON batch'}</button>)}</div><Button onClick={() => { setMode('json'); setJson(JSON.stringify(SAMPLE_DOCUMENTS, null, 2)); setValidation(null); setResult(null); }}><FileJson2 size={15} /> Load sample corpus</Button></div>
-      <form className="space-y-5 p-5 sm:p-7" onSubmit={event => { event.preventDefault(); void submit(); }}>
+      <div className="flex flex-wrap items-center justify-between gap-3 border-b border-line p-5"><div className="segmented" aria-label="Input mode">{(['files', 'form', 'json'] as const).map(value => <button key={value} disabled={filesBusy} aria-pressed={mode === value} className={mode === value ? 'active' : ''} onClick={() => { setMode(value); setValidation(null); setResult(null); }}>{value === 'files' ? 'File upload' : value === 'form' ? 'Paste text' : 'JSON batch'}</button>)}</div><Button disabled={filesBusy} onClick={() => { setMode('json'); setJson(JSON.stringify(SAMPLE_DOCUMENTS, null, 2)); setValidation(null); setResult(null); }}><FileJson2 size={15} /> Load sample corpus</Button></div>
+      <div hidden={mode !== 'files'}><FileUploadPanel api={api} authenticated={authenticated} onConnect={onConnect} onBusy={setFilesBusy} /></div>
+      <form hidden={mode === 'files'} className="space-y-5 p-5 sm:p-7" onSubmit={event => { event.preventDefault(); void submit(); }}>
         {mode === 'form' ? <><div className="grid gap-5 sm:grid-cols-2"><label className="field">Document ID<input value={fields.id} onChange={e => update('id', e.target.value)} placeholder="support-policy" maxLength={100} required /><span>Stable ID; reusing it replaces the document.</span></label><label className="field">Title<input value={fields.title} onChange={e => update('title', e.target.value)} placeholder="Enterprise support policy" maxLength={200} required /></label></div><label className="field">Source<input value={fields.source} onChange={e => update('source', e.target.value)} placeholder="https://docs.example.com/support or urn:acme:support" maxLength={500} required /></label><label className="field">Access groups<input value={fields.groups} onChange={e => update('groups', e.target.value)} placeholder="staff, support" required /><span>Comma-separated. Only matching groups can retrieve this document.</span></label><label className="field">Document text<textarea value={fields.text} onChange={e => update('text', e.target.value)} rows={9} maxLength={200000} placeholder="Paste the source text here. Paragraphs and exact wording are preserved." required /></label></> : <><div className="flex items-center justify-between"><label htmlFor="batch-json" className="label">DOCUMENTS PAYLOAD</label><Button onClick={() => upload.current?.click()}><Upload size={14} /> Import JSON</Button></div><input ref={upload} type="file" accept=".json,application/json" className="hidden" aria-label="Import JSON file" onChange={async e => {
           const file = e.target.files?.[0]; e.target.value = '';
           if (!file) return;
@@ -571,6 +685,124 @@ export function IngestionPanel({ api, authenticated, onConnect }: { api: ApiClie
       </form>
     </div>
   </section>;
+}
+
+```
+
+## `src/components/FileUploadPanel.tsx`
+
+```tsx
+import { useEffect, useRef, useState } from 'react';
+import { CheckCircle2, FileUp, Trash2, Upload } from 'lucide-react';
+import { type ApiClient, errorMessage } from '../api/client';
+import { validateFile, type UploadLimits, type UploadResult } from '../api/uploads';
+import { Button, ErrorNotice } from './ui';
+
+type Entry = { id: string; file: File; documentId: string; progress: number;
+  status: 'queued' | 'uploading' | 'processing' | 'indexed' | 'error' | 'cancelled';
+  error?: string; result?: UploadResult; invalid?: boolean };
+
+export function FileUploadPanel({ api, authenticated, onConnect, onBusy }: {
+  api: ApiClient; authenticated: boolean; onConnect: () => void; onBusy: (busy: boolean) => void;
+}) {
+  const [limits, setLimits] = useState<UploadLimits | null>(null);
+  const [limitsError, setLimitsError] = useState<string | null>(null);
+  const [reload, setReload] = useState(0);
+  const [entries, setEntries] = useState<Entry[]>([]);
+  const [groups, setGroups] = useState('staff');
+  const [busy, setBusy] = useState(false);
+  const [dragging, setDragging] = useState(false);
+  const [validation, setValidation] = useState<string | null>(null);
+  const input = useRef<HTMLInputElement>(null);
+  const controller = useRef<AbortController | null>(null);
+  useEffect(() => {
+    const abort = new AbortController();
+    setLimitsError(null);
+    void api.uploadLimits(abort.signal).then(setLimits).catch(error => {
+      if (!abort.signal.aborted) setLimitsError(`${errorMessage(error)} Restart the backend after installing the upload dependencies.`);
+    });
+    return () => abort.abort();
+  }, [api, reload]);
+  useEffect(() => () => controller.current?.abort(), []);
+
+  const update = (id: string, changes: Partial<Entry>) => setEntries(previous => previous.map(entry => entry.id === id ? { ...entry, ...changes } : entry));
+  const addFiles = (files: FileList | File[]) => {
+    if (!limits || busy) return;
+    const selected = Array.from(files);
+    if (entries.length + selected.length > 20) { setValidation('Queue up to 20 files at a time. Remove completed files to add more.'); return; }
+    const names = new Set(entries.map(entry => entry.file.name));
+    const next: Entry[] = [];
+    for (const file of selected) {
+      if (names.has(file.name)) { setValidation('A file with this name is already in the queue. Remove it before adding a replacement.'); continue; }
+      names.add(file.name);
+      const error = validateFile(file, limits);
+      next.push({ id: crypto.randomUUID(), file, documentId: '', status: error ? 'error' : 'queued', progress: 0, error: error ?? undefined, invalid: !!error });
+    }
+    setEntries(previous => [...previous, ...next]);
+  };
+  const submit = async () => {
+    if (!authenticated) { onConnect(); return; }
+    if (controller.current || !limits) return;
+    const accessGroups = groups.split(',').map(group => group.trim()).filter(Boolean);
+    if (!accessGroups.length || accessGroups.length > 50) { setValidation('Provide between 1 and 50 access groups.'); return; }
+    const pending = entries.filter(entry => !entry.invalid && entry.status !== 'indexed');
+    if (!pending.length) return;
+    if (pending.some(entry => entry.documentId && !/^[A-Za-z0-9_.-]{1,100}$/.test(entry.documentId))) {
+      setValidation('Document IDs can contain only letters, numbers, dots, underscores and hyphens (up to 100 characters).'); return;
+    }
+    const customIds = pending.map(entry => entry.documentId).filter(Boolean);
+    if (new Set(customIds).size !== customIds.length) { setValidation('Use distinct document IDs for files in this queue.'); return; }
+    const abort = new AbortController(); controller.current = abort;
+    setBusy(true); onBusy(true); setValidation(null);
+    try {
+      for (const entry of pending) {
+        if (abort.signal.aborted) break;
+        update(entry.id, { status: 'uploading', progress: 0, error: undefined });
+        try {
+          const result = await api.uploadFile(entry.file, accessGroups, entry.documentId, progress => {
+            update(entry.id, { progress, status: progress === 100 ? 'processing' : 'uploading' });
+          }, abort.signal);
+          update(entry.id, { status: 'indexed', result, progress: 100 });
+        } catch (error) {
+          update(entry.id, { status: abort.signal.aborted ? 'cancelled' : 'error', error: errorMessage(error) });
+        }
+      }
+    } finally {
+      controller.current = null; setBusy(false); onBusy(false);
+    }
+  };
+  return <div className="space-y-5 p-5 sm:p-7">
+    <div><h2 className="font-semibold">Upload source files</h2><p className="muted mt-1 text-sm">Extract text, create chunks and index your documents in one step.</p></div>
+    <ErrorNotice message={limitsError} />
+    {limitsError && <Button onClick={() => setReload(value => value + 1)}>Reload upload settings</Button>}
+    {!limits && !limitsError && <div className="skeleton h-24 rounded-xl" aria-label="Loading upload settings" />}
+    {limits && <>
+      <input ref={input} type="file" multiple accept={limits.extensions.join(',')} className="sr-only" aria-label="Choose source files" disabled={busy} onChange={event => { if (event.target.files) addFiles(event.target.files); event.target.value = ''; }} />
+      <button type="button" disabled={busy} className={`upload-dropzone ${dragging ? 'dragging' : ''}`} onClick={() => input.current?.click()}
+        onDragOver={event => { event.preventDefault(); if (!busy) setDragging(true); }} onDragLeave={() => setDragging(false)}
+        onDrop={event => { event.preventDefault(); setDragging(false); addFiles(event.dataTransfer.files); }}>
+        <FileUp size={30} className="text-accent" /><span className="font-semibold">Drop files here, or click to browse</span>
+        <span className="muted text-xs">{limits.extensions.join(' · ')} · {(limits.max_file_bytes / 1048576).toFixed(0)} MiB per file</span>
+      </button>
+      <label className="field">Access groups<input value={groups} onChange={event => setGroups(event.target.value)} disabled={busy} placeholder="staff" /><span>Comma-separated. Groups must belong to your connected identity.</span></label>
+      <p className="muted text-xs leading-5">Each file is indexed independently. Its filename supplies the title and a stable source ID. Uploading the same filename replaces its previous document; set a custom ID to keep versions. PDFs need selectable text; OCR is not included.</p>
+      <ErrorNotice message={validation} />
+      <ul className="space-y-3" aria-label="Selected files">
+        {entries.map(entry => <li key={entry.id} className="upload-file">
+          <div className="flex items-start justify-between gap-3"><div className="min-w-0"><div className="font-medium break-all">{entry.file.name}</div><div className="muted text-xs mt-1">{(entry.file.size / 1024).toFixed(1)} KiB</div></div>
+            <Button disabled={busy} onClick={() => setEntries(previous => previous.filter(item => item.id !== entry.id))} aria-label={`Remove ${entry.file.name}`}><Trash2 size={15} /></Button></div>
+          <label className="field mt-3 text-xs">Document ID (optional)<input value={entry.documentId} disabled={busy || entry.status === 'indexed'} maxLength={100} placeholder="Automatic stable ID from filename" onChange={event => update(entry.id, { documentId: event.target.value })} /></label>
+          {(entry.status === 'uploading' || entry.status === 'processing') && <div className="mt-3"><progress className="upload-progress" value={entry.progress} max={100} aria-label={`Upload progress for ${entry.file.name}`} /><p className="muted text-xs mt-1" role="status">{entry.status === 'processing' ? 'Upload complete · Parsing and indexing…' : `Uploading ${entry.progress}%`}</p></div>}
+          {entry.status === 'queued' && <p className="muted mt-3 text-xs">Ready to upload</p>}
+          {entry.result && <div className="success-notice mt-3" role="status"><CheckCircle2 size={18} /><div><p>Indexed {entry.result.indexed_chunks} chunks · {entry.result.extracted_characters.toLocaleString()} characters</p><p className="text-xs mt-1 break-all">{entry.result.document_id}</p></div></div>}
+          {entry.result?.warnings.map((warning, index) => <p key={index} className="muted text-xs mt-2">{warning}</p>)}
+          {entry.error && <div className="mt-3"><ErrorNotice message={entry.error} /></div>}
+        </li>)}
+      </ul>
+      <div className="flex flex-wrap items-center justify-between gap-3 border-t border-line pt-5"><p className="muted text-xs">{entries.filter(entry => entry.status === 'indexed').length} of {entries.length} files indexed</p><div className="flex gap-2">{busy && <Button onClick={() => controller.current?.abort()}>Cancel upload queue</Button>}<Button variant="primary" disabled={busy || !entries.some(entry => !entry.invalid && entry.status !== 'indexed')} onClick={() => void submit()}>{busy ? <><span className="loading-dot" /> Processing files…</> : <><Upload size={16} />{authenticated ? 'Upload / retry pending files' : 'Connect to upload'}</>}</Button></div></div>
+      <p className="muted text-xs leading-5">Up to {limits.max_extracted_chars.toLocaleString()} extracted characters, {limits.max_pdf_pages} PDF pages or {limits.max_excel_sheets} Excel sheets. Cancel stops this browser request and queued files; server indexing may already have completed.</p>
+    </>}
+  </div>;
 }
 
 ```
@@ -836,6 +1068,15 @@ mark { background:var(--accent-soft); color:var(--ink); border-bottom:1px solid 
 @media (max-width:640px) { .app-shell { display:block; } .navigation { position:static; height:auto; padding:14px 16px 0; border-right:0; border-bottom:1px solid var(--line); } .brand { padding:0 0 16px; gap:10px; } .brand-symbol { height:32px; width:30px; font-size:19px; } .brand>div:last-child { display:flex; align-items:baseline; gap:10px; } .nav-label,.nav-bottom { display:none; } .navigation nav { display:flex; gap:4px; } .nav-item { justify-content:center; gap:7px; font-size:12px; padding:10px 7px; margin:0 0 10px; } .nav-item svg { width:15px; } .nav-active-marker { display:none; } .topbar { padding:12px 16px; min-height:61px; } .mobile-theme { display:block; padding:6px; color:var(--muted); } .main-content { padding:26px 16px; } .section-heading h1 { font-size:25px; } .section-heading { margin-bottom:23px; } .query-box { padding:16px; } .welcome-state { padding:28px 20px; } .connection-banner { padding:12px 16px; align-items:flex-start; } .footer { padding:16px; } }
 @media (prefers-reduced-motion:reduce) { *,*::before,*::after { animation:none !important; transition:none !important; scroll-behavior:auto !important; } }
 
+/* File upload controls inherit the workbench light/dark tokens. */
+.upload-dropzone { width: 100%; display: flex; flex-direction: column; align-items: center; gap: .65rem; padding: 2rem 1rem; border: 2px dashed var(--line); border-radius: 1rem; background: var(--surface); transition: border-color .2s, background .2s; cursor: pointer; }
+.upload-dropzone:hover, .upload-dropzone.dragging { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 7%, transparent); }
+.upload-dropzone:disabled { opacity: .6; cursor: wait; }
+.upload-file { border: 1px solid var(--line); border-radius: .85rem; padding: 1rem; }
+.upload-progress { display: block; width: 100%; height: .4rem; accent-color: var(--accent); border-radius: 1rem; }
+.upload-progress::-webkit-progress-bar { background: var(--line); border-radius: 1rem; }
+.upload-progress::-webkit-progress-value { background: var(--accent); border-radius: 1rem; transition: width .2s; }
+
 ```
 
 ## `vite.config.ts`
@@ -852,8 +1093,8 @@ export default defineConfig(({ mode }) => {
       target: env.API_PROXY_TARGET || 'http://127.0.0.1:8000',
       changeOrigin: true,
       rewrite: (path: string) => path.replace(/^\/api(?=\/|$)/, ''),
-      timeout: 135_000,
-      proxyTimeout: 135_000,
+      timeout: 195_000,
+      proxyTimeout: 195_000,
     },
   };
   return {
@@ -933,6 +1174,82 @@ describe('state and content safety', () => {
   it('rejects duplicate document ids and client-side tenant overrides', () => {
     expect(IngestSchema.safeParse({ documents: [SAMPLE_DOCUMENTS.documents[0], SAMPLE_DOCUMENTS.documents[0]] }).success).toBe(false);
     expect(IngestSchema.safeParse({ ...SAMPLE_DOCUMENTS, tenant: 'other' }).success).toBe(false);
+  });
+});
+
+```
+
+## `tests/uploads.test.ts`
+
+```typescript
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { ApiClient } from '../src/api/client';
+import { validateFile, type UploadLimits } from '../src/api/uploads';
+
+const limits: UploadLimits = { extensions: ['.pdf', '.txt'], max_file_bytes: 1000, max_extracted_chars: 200000, max_pdf_pages: 100, max_excel_sheets: 50, parse_timeout_s: 30 };
+const result = { document_id: 'file-test', source: 'urn:upload:test', indexed_chunks: 2, extracted_characters: 500, warnings: [] };
+class FakeXHR {
+  static latest: FakeXHR;
+  headers: Record<string, string> = {};
+  upload: { onprogress?: (event: { lengthComputable: boolean; loaded: number; total: number }) => void; onload?: () => void } = {};
+  onload?: () => void; onabort?: () => void; onerror?: () => void; ontimeout?: () => void;
+  status = 200; responseText = JSON.stringify(result); timeout = 0;
+  body?: FormData; method = ''; url = '';
+  constructor() { FakeXHR.latest = this; }
+  open(method: string, url: string) { this.method = method; this.url = url; }
+  setRequestHeader(name: string, value: string) { this.headers[name] = value; }
+  send(body: FormData) { this.body = body; }
+  abort() { this.onabort?.(); }
+}
+afterEach(() => vi.unstubAllGlobals());
+describe('upload validation and multipart client', () => {
+  it('validates extension, empty files, size and filename', () => {
+    expect(validateFile({ name: 'resume.PDF', size: 1000 }, limits)).toBeNull();
+    expect(validateFile({ name: 'resume.pdf', size: 1001 }, limits)).toContain('exceeds');
+    expect(validateFile({ name: 'resume.exe', size: 10 }, limits)).toContain('Unsupported');
+    expect(validateFile({ name: 'resume.txt', size: 0 }, limits)).toContain('empty');
+  });
+  it('sends authenticated multipart and measures bytes before awaiting indexing', async () => {
+    vi.stubGlobal('XMLHttpRequest', FakeXHR);
+    const progress = vi.fn();
+    const promise = new ApiClient('test-token', '/api').uploadFile(new File(['content'], 'resume.txt'), ['staff'], 'resume-v1', progress, new AbortController().signal);
+    const xhr = FakeXHR.latest;
+    expect(xhr.url).toBe('/api/ingest/file');
+    expect(xhr.headers).toEqual({ Authorization: 'Bearer test-token' });
+    expect(xhr.body?.get('groups')).toBe('["staff"]');
+    expect(xhr.body?.get('document_id')).toBe('resume-v1');
+    expect((xhr.body?.get('file') as File).name).toBe('resume.txt');
+    xhr.upload.onprogress?.({ lengthComputable: true, loaded: 50, total: 100 });
+    expect(progress).toHaveBeenLastCalledWith(50);
+    xhr.upload.onload?.();
+    expect(progress).toHaveBeenLastCalledWith(100);
+    xhr.onload?.();
+    await expect(promise).resolves.toEqual(result);
+  });
+  it('surfaces safe parsing failures and cancellation', async () => {
+    vi.stubGlobal('XMLHttpRequest', FakeXHR);
+    const api = new ApiClient('');
+    const file = new File(['bad'], 'resume.pdf');
+    const failed = api.uploadFile(file, ['staff'], '', vi.fn(), new AbortController().signal);
+    FakeXHR.latest.status = 422;
+    FakeXHR.latest.responseText = JSON.stringify({ detail: { code: 'corrupt_file', message: 'Invalid PDF.' } });
+    FakeXHR.latest.onload?.();
+    await expect(failed).rejects.toThrow('Invalid PDF.');
+    const abort = new AbortController();
+    const cancelled = api.uploadFile(file, ['staff'], '', vi.fn(), abort.signal);
+    abort.abort();
+    await expect(cancelled).rejects.toMatchObject({ name: 'AbortError' });
+  });
+  it('rejects invalid success contracts and pre-aborted requests', async () => {
+    vi.stubGlobal('XMLHttpRequest', FakeXHR);
+    const api = new ApiClient('');
+    const file = new File(['text'], 'resume.txt');
+    const invalid = api.uploadFile(file, ['staff'], '', vi.fn(), new AbortController().signal);
+    FakeXHR.latest.responseText = '{}'; FakeXHR.latest.onload?.();
+    await expect(invalid).rejects.toThrow('does not match');
+    const abort = new AbortController(); abort.abort();
+    await expect(api.uploadFile(file, ['staff'], '', vi.fn(), abort.signal)).rejects.toMatchObject({ name: 'AbortError' });
+    expect(FakeXHR.latest.body).toBeUndefined();
   });
 });
 

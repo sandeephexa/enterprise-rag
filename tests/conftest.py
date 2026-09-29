@@ -13,6 +13,8 @@ TOKEN = "test-only-token-with-at-least-24-characters"
 def settings(tmp_path):
     return Settings(
         mode="demo",
+        generation_evidence_mode="quote",
+        answer_style="synthesis",
         database_path=tmp_path / "index.db",
         access_keys=[
             AccessKey(

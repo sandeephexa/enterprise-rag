@@ -78,6 +78,7 @@ async def test_fabricated_counter_quote_rejected(pipeline, document, principal):
 async def test_live_conflict_adjudication_policy(pipeline, document, principal, outcome):
     pipeline.store.ingest([document], principal)
     pipeline.settings.mode = "live"
+    pipeline.settings.rewrite_mode = "always"
     calls = []
 
     class SuspectNLI:

@@ -27,6 +27,22 @@ HIGH_RISK = re.compile(
 )
 
 
+def requires_human_review(text: str) -> bool:
+    """Distinguish a factual insurance-benefit lookup from medical advice."""
+    if not HIGH_RISK.search(text):
+        return False
+    insurance_lookup = re.search(r"\bmedical\s+insurance\b", text, re.I) and re.search(
+        r"\b(?:premium|coverage|benefits|sum insured)\b", text, re.I
+    )
+    advice = re.search(
+        r"\b(?:diagnos\w*|treat\w*|symptoms?|dosage|prescrib\w*|recommend\w*|"
+        r"should|advice|choose|lawsuit|investment|terminate employee)\b",
+        text,
+        re.I,
+    )
+    return not (insurance_lookup and not advice)
+
+
 class RejectedInput(ValueError):
     """Input violates the configured enterprise content policy."""
 
@@ -95,22 +111,30 @@ class NeuralEntailment:
     def scores(self, pairs: Sequence[tuple[str, str]]) -> list[tuple[float, float]]:
         if not pairs:
             return []
+        unique_pairs = list(dict.fromkeys(pairs))
         with self.lock:
-            for context, claim in pairs:
+            for context, claim in unique_pairs:
                 if len(self.model.tokenizer(context, claim, truncation=False)["input_ids"]) > 512:
                     raise ValueError("NLI input too long for reliable verification")
-            logits = np.asarray(self.model.predict(list(pairs), show_progress_bar=False))
+            logits = np.asarray(
+                self.model.predict(
+                    unique_pairs,
+                    batch_size=self.settings.nli_batch_size,
+                    show_progress_bar=False,
+                )
+            )
         probabilities = np.exp(logits - logits.max(axis=1, keepdims=True))
         probabilities /= probabilities.sum(axis=1, keepdims=True)
         if not np.isfinite(probabilities).all():
             raise ValueError("Non-finite NLI scores")
-        return [
-            (
+        by_pair = {
+            pair: (
                 float(row[self.settings.nli_entailment_index]),
                 float(row[self.settings.nli_contradiction_index]),
             )
-            for row in probabilities
-        ]
+            for pair, row in zip(unique_pairs, probabilities, strict=True)
+        }
+        return [by_pair[pair] for pair in pairs]
 
 
 @dataclass
@@ -192,6 +216,35 @@ class HallucinationGuard:
             and score[1] <= self.settings.contradiction_threshold
             for score in scores[: len(checks)]
         ]
+        # A short quote may omit its subject, table headers or units. Reuse the
+        # already-scored cited passage to supply that context, and expand the
+        # returned citation so the user sees exactly what was used for verification.
+        # Uncited passages cannot rescue an unsupported claim.
+        for index, claim in enumerate(output.claims):
+            if supported[index]:
+                continue
+            cited_ids = {e.chunk_id for e in claim.evidence}
+            for offset, hit in enumerate(contexts):
+                score = scores[len(checks) + index * len(contexts) + offset]
+                if (
+                    hit.chunk.id in cited_ids
+                    and score[0] >= self.settings.entailment_threshold
+                    and score[1] <= self.settings.contradiction_threshold
+                ):
+                    supported[index] = True
+                    citations = [
+                        citation.model_copy(
+                            update={
+                                "quote": hit.chunk.text,
+                                "start": hit.chunk.start,
+                                "end": hit.chunk.end,
+                            }
+                        )
+                        if citation.claim_index == index and citation.chunk_id == hit.chunk.id
+                        else citation
+                        for citation in citations
+                    ]
+                    break
         # An NLI score is a suspicion, not proof of incompatible source facts.
         # Keep the exact pairs so live orchestration can distinguish an omission
         # in an unrelated excerpt from a genuine contradictory assertion.

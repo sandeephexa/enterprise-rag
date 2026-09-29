@@ -6,11 +6,13 @@ Two explicit operating profiles exist: **live** uses real semantic embeddings, c
 
 This is a complete implementation for a bounded, single-service deployment. Production acceptance still depends on corpus-specific calibration, load testing, identity provisioning, infrastructure security and live-provider validation. It does not guarantee hallucination-free output.
 
-See [the executed validation record](VALIDATION.md) for the 47 passing tests, real neural smoke results, HTTP/telemetry checks and untested deployment boundaries.
+See [the executed validation record](VALIDATION.md) for the 117 passing backend tests, real neural smoke results, HTTP/telemetry checks and untested deployment boundaries.
 
 For a hands-on walkthrough, use the [step-by-step testing guide](testing/TESTING_GUIDE.md). The `testing/` folder includes request payloads, separate demo/live evaluation datasets, and an isolated real-HTTP runner with 26 passing acceptance checks.
 
 The [React workbench](frontend/README.md) provides query execution, evidence inspection, document ingestion and review decisions. Start it with `cd frontend && npm ci && npm run dev` after starting the API. Complete component code is collected in [the frontend code guide](frontend/FRONTEND_CODE_GUIDE.md).
+
+Direct file ingestion supports PDF, Markdown, XLSX, DOCX, CSV and TXT. See [file upload setup, API contracts, parsing limits and end-to-end tests](FILE_UPLOADS.md).
 
 ## PART 1: SYSTEM DESIGN & PORTFOLIO DOCUMENTATION
 
@@ -30,8 +32,9 @@ flowchart TD
     V --> C[Sentence / paragraph / semantic chunks]
     C --> I[Atomic SQLite vector + lexical index]
     Q[Authenticated query] --> G[Schema and input guardrails]
-    G --> W[Optional query expansion; retain original]
-    W --> A[Tenant and group filtered snapshot]
+    G --> CACHED{Verified cache match}
+    CACHED -->|Hit| O
+    CACHED -->|Miss| A[Tenant and group filtered snapshot]
     I --> A
     A --> S[Semantic vector search]
     A --> B[BM25 keyword search]
@@ -40,7 +43,9 @@ flowchart TD
     R --> X[Cross-encoder reranking]
     X --> K[Threshold-based dynamic K]
     K --> T[Deduplicate and assemble bounded context]
-    T --> P[Structured grounded generation]
+    T -->|Evidence available| P[Structured grounded generation]
+    T -->|No evidence, once| W[Bounded query expansion; retain original]
+    W --> A
     P --> H[Exact evidence + NLI support + contradiction checks]
     H --> F{Release decision}
     F --> O[Deterministic cited answer]
@@ -56,8 +61,11 @@ flowchart TD
 
 - **Transactional hybrid storage:** embeddings, token postings and chunk provenance commit in one SQLite transaction. Both retrievers rank the same authorized snapshot. Exact vector search is easy to audit and has no approximate-recall loss, but scan cost grows with the corpus. The default cap is 20,000 chunks per tenant; it is a guardrail, not a demonstrated capacity guarantee. Benchmark before increasing it. A large deployment should replace the `HybridStore` adapter with an access-filtered distributed vector/keyword service and versioned ingestion jobs.
 - **Reciprocal rank fusion:** each candidate receives `sum(1 / (60 + rank))` across the semantic and BM25 rankings for the original query and up to two expansions. This avoids adding incompatible raw cosine and BM25 scores. More searches improve coverage but increase work and can introduce expansion drift. Reranking always uses the original question.
+- **Latency policy:** search the original query first; expand only when no usable contexts were selected. `RAG_REWRITE_MODE=always` restores expansion on every live query for recall experiments; `off` disables it. Test this trade-off on your labeled corpus. Verified answers can be reused for 60 seconds under the same identity, settings and corpus revision. Supported document mutations invalidate the tenant cache; cache hits have fresh trace IDs and zero new provider usage. See the [latency operation notes](RUNBOOK.md#latency-controls) and [measured results](latency-benchmark.json).
 - **Cross-encoder ranking:** a joint query-passage model scores up to 30 fused candidates. This is more expensive than vector similarity, but separates topical similarity from answer-bearing context. At most six chunks pass both an absolute score threshold and a relative-to-best threshold. No minimum K forces irrelevant chunks into the prompt. Sigmoid scores are not calibrated probabilities.
 - **Chunk strategies:** sentence chunks favor precise evidence but lose surrounding conditions; paragraph chunks retain local explanations but may mix topics; semantic boundaries add embedding work during ingestion. A hard character cap and optional overlap apply. Exact source slices preserve provenance. The live embedding and pair models reject overlength inputs instead of silently truncating; reduce chunk/query lengths when rejected. Sentence boundary detection is deliberately a configurable simple regex, so evaluate abbreviations and multilingual corpora before use.
+- **Document-Q&A default:** `RAG_ANSWER_STYLE=extractive` uses the LLM to select source sentence IDs; the server constructs answer wording and citations from those exact sentences. PDF line wraps remain within a sentence. Semantic embeddings, hybrid retrieval, reranking and full grounding checks remain enabled. This avoids the generation/repair loop for ordinary factual lookups. Use `synthesis` explicitly for generated paraphrases; exact excerpts are labeled in the workbench.
+- **Optional compact synthesized generation:** the model returns claims and references to exact sentence/line spans. The server constructs quotes from the original indexed text and restores canonical chunk IDs before all grounding checks. Source text is fully preserved; the public answer/citation schema is unchanged. Set `RAG_GENERATION_EVIDENCE_MODE=quote` to use the original quote-emitting contract.
 - **Separate evidence and entailment checks:** exact quote matching prevents fabricated citations. A local NLI model checks claim support and contradictions, independently of the generator. Neither quotes nor NLI constitute proof of truth; source quality, missing evidence and domain shift remain risks. Contradictory retrieved passages withhold the entire answer.
 - **Whole-answer release:** the public answer is rendered exclusively from validated claims. There is no unvalidated summary field. A rejected claim withholds the whole draft, trading coverage for easier auditability.
 - **Single process, bounded inference:** CPU work uses a fixed thread pool and admission permits. A timed-out worker retains its permit until it actually finishes, preventing a growing backlog of abandoned neural work. Threads cannot forcibly interrupt model execution; process isolation is appropriate for hard compute cancellation requirements.

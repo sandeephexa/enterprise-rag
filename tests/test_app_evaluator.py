@@ -13,7 +13,10 @@ async def test_api_auth_ingest_query_and_payload_limit(settings, pipeline, docum
         app.router.lifespan_context(app),
         httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client,
     ):
-        assert (await client.get("/health/ready")).status_code == 200
+        health = await client.get("/health/ready")
+        assert health.status_code == 200
+        assert health.json()["pipeline_revision"] == "source-selection-v1"
+        assert health.json()["answer_style"] == settings.answer_style
         assert (await client.post("/query", json={"text": "support hours"})).status_code == 401
         headers = {"Authorization": "Bearer " + TOKEN}
         assert (

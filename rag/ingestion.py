@@ -43,6 +43,10 @@ class DemoEncoder:
         return matrix / np.maximum(norms, 1e-12)
 
 
+class EmbeddingInputTooLong(ValueError):
+    """An input cannot be embedded without truncating evidence."""
+
+
 class SemanticEncoder:
     """Local sentence embedding model; oversized texts fail rather than truncate."""
 
@@ -59,11 +63,21 @@ class SemanticEncoder:
         self.identity = f"{settings.embedding_model}@{settings.embedding_revision or 'main'}"
         self.lock = threading.Lock()
 
+    def fits(self, text: str) -> bool:
+        """Count actual model tokens, including special tokens, without truncation."""
+        with self.lock:
+            ids = self.model.tokenizer(text, truncation=False, verbose=False)["input_ids"]
+            return len(ids) <= self.model.max_seq_length
+
     def encode(self, texts: Sequence[str]) -> NDArray[np.float32]:
         with self.lock:
-            lengths = self.model.tokenizer(list(texts), truncation=False)["input_ids"]
+            lengths = self.model.tokenizer(list(texts), truncation=False, verbose=False)[
+                "input_ids"
+            ]
             if any(len(ids) > self.model.max_seq_length for ids in lengths):
-                raise ValueError("Embedding input exceeds model limit; reduce chunk/query length")
+                raise EmbeddingInputTooLong(
+                    "Embedding input exceeds model limit; reduce chunk/query length"
+                )
             vectors = np.asarray(
                 self.model.encode(
                     list(texts),
@@ -83,6 +97,29 @@ class Chunker:
     def __init__(self, settings: Settings, encoder: Encoder) -> None:
         self.settings, self.encoder = settings, encoder
 
+    def _fits(self, text: str) -> bool:
+        # Encoders without a context limit (demo and injected adapters) retain char limits.
+        fits = getattr(self.encoder, "fits", None)
+        return fits(text) if fits is not None else True
+
+    def _fit_end(self, text: str, start: int, end: int) -> int:
+        """Shorten an exact source slice to fit the tokenizer, preferring word boundaries."""
+        if self._fits(text[start:end]):
+            return end
+        low, high, best = start + 1, end - 1, start
+        while low <= high:
+            middle = (low + high) // 2
+            if self._fits(text[start:middle]):
+                best, low = middle, middle + 1
+            else:
+                high = middle - 1
+        if best == start:
+            raise EmbeddingInputTooLong("Embedding token limit cannot fit one source character")
+        space = text.rfind(" ", start + (best - start) // 2, best)
+        if space > start and self._fits(text[start : space + 1]):
+            return space + 1
+        return best
+
     def split(self, document: Document, tenant: str) -> list[Chunk]:
         text, cfg = document.text, self.settings
         pattern = r"\n\s*\n" if cfg.chunk_strategy == "paragraph" else r"(?<=[.!?])\s+|\n+"
@@ -95,6 +132,7 @@ class Chunker:
                     space = text.rfind(" ", start + cfg.chunk_chars // 2, stop)
                     if space > start:
                         stop = space + 1
+                stop = self._fit_end(text, start, stop)
                 units.append((start, stop))
                 start = stop
         vectors = (
@@ -109,12 +147,20 @@ class Chunker:
                 vectors is not None
                 and float(vectors[index - 1] @ vectors[index]) < cfg.semantic_break_threshold
             )
-            if b - start > cfg.chunk_chars or semantic_break or cfg.chunk_strategy == "sentence":
+            if (
+                b - start > cfg.chunk_chars
+                or not self._fits(text[start:b])
+                or semantic_break
+                or cfg.chunk_strategy == "sentence"
+            ):
                 spans.append((start, end))
                 start = a
                 # Preserve full new unit; only use overlap if it fits the hard cap.
                 if cfg.chunk_strategy != "sentence":
-                    start = max(0, a - min(cfg.overlap_chars, cfg.chunk_chars - (b - a)))
+                    overlap_start = max(0, a - min(cfg.overlap_chars, cfg.chunk_chars - (b - a)))
+                    # Optional overlap must not make an otherwise valid unit too large.
+                    if self._fits(text[overlap_start:b]):
+                        start = overlap_start
             end = b
         spans.append((start, end))
         version = hashlib.sha256(document.text.encode()).hexdigest()
@@ -157,6 +203,7 @@ class HybridStore:
             db.execute("PRAGMA journal_mode=WAL")
             db.executescript("""
                 CREATE TABLE IF NOT EXISTS metadata(key TEXT PRIMARY KEY, value TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS corpus_versions(tenant TEXT PRIMARY KEY, revision INTEGER NOT NULL);
                 CREATE TABLE IF NOT EXISTS chunks(
                     tenant TEXT NOT NULL, id TEXT NOT NULL, document_id TEXT NOT NULL,
                     payload TEXT NOT NULL, vector BLOB NOT NULL, tokens TEXT NOT NULL,
@@ -222,7 +269,24 @@ class HybridStore:
                     for chunk, vector in zip(chunks, vectors, strict=True)
                 ],
             )
+            self._bump_revision(db, principal.tenant)
         return len(chunks)
+
+    @staticmethod
+    def _bump_revision(db: sqlite3.Connection, tenant: str) -> None:
+        db.execute(
+            "INSERT INTO corpus_versions(tenant,revision) VALUES(?,1) "
+            "ON CONFLICT(tenant) DO UPDATE SET revision=revision+1",
+            (tenant,),
+        )
+
+    def revision(self, tenant: str) -> int:
+        """Revision changes atomically with supported ingestion/deletion operations."""
+        with self.connect() as db:
+            row = db.execute(
+                "SELECT revision FROM corpus_versions WHERE tenant=?", (tenant,)
+            ).fetchone()
+        return row[0] if row else 0
 
     def snapshot(
         self, principal: Principal
@@ -244,9 +308,13 @@ class HybridStore:
 
     def delete(self, document_id: str, tenant: str) -> int:
         with self.connect() as db:
-            return db.execute(
-                "DELETE FROM chunks WHERE tenant=? AND document_id=?", (tenant, document_id)
+            count = db.execute(
+                "DELETE FROM chunks WHERE tenant=? AND document_id=?",
+                (tenant, document_id),
             ).rowcount
+            if count:
+                self._bump_revision(db, tenant)
+            return count
 
     def save_review(
         self,

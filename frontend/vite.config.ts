@@ -9,8 +9,8 @@ export default defineConfig(({ mode }) => {
       target: env.API_PROXY_TARGET || 'http://127.0.0.1:8000',
       changeOrigin: true,
       rewrite: (path: string) => path.replace(/^\/api(?=\/|$)/, ''),
-      timeout: 135_000,
-      proxyTimeout: 135_000,
+      timeout: 195_000,
+      proxyTimeout: 195_000,
     },
   };
   return {

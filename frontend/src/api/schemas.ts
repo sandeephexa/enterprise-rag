@@ -13,6 +13,9 @@ export const HitSchema = z.object({
   fusion_score: number, rerank_score: number.nullable(),
 });
 export const AnswerSchema = z.object({
+  cache_hit: z.boolean().optional(),
+  answer_style: z.enum(['extractive', 'synthesis']).optional(),
+  initial_verification_reasons: z.array(z.string()).optional(),
   request_id: z.string(), trace_id: z.string(), status: z.enum(['answered', 'abstained', 'review']),
   answer: z.string(), claims: z.array(ClaimSchema), citations: z.array(CitationSchema),
   contexts: z.array(HitSchema), review_reasons: z.array(z.string()), faithfulness: number.nullable(),
@@ -42,4 +45,5 @@ export type Citation = z.infer<typeof CitationSchema>;
 export type Hit = z.infer<typeof HitSchema>;
 export type Review = z.infer<typeof ReviewSchema>;
 export type IngestBatch = z.infer<typeof IngestSchema>;
-export type Health = { status: string; mode: 'live' | 'demo' };
+export const PIPELINE_REVISION = 'source-selection-v1';
+export type Health = { status: string; mode: 'live' | 'demo'; pipeline_revision?: string; answer_style?: 'extractive' | 'synthesis' };

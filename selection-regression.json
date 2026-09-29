@@ -1,0 +1,182 @@
+{
+  "scope": "Eight live-provider pipeline runs, answer cache disabled; three exact repetitions, two paraphrases, designation lookup and two absent facts. Temporary database backup. Does not establish production percentiles. Exact source text/credentials omitted.",
+  "records": [
+    {
+      "case": "exact-1",
+      "expected_answer": true,
+      "status": "answered",
+      "answer_style": "extractive",
+      "passed": true,
+      "latency_ms": 3448.72,
+      "stages": {
+        "retrieve": 18.03,
+        "rerank": 349.65,
+        "generate": 2161.95,
+        "verify": 918.74
+      },
+      "claims": 2,
+      "citations": 2,
+      "exact_source_wording": true,
+      "attempts": 1,
+      "output_tokens": 29,
+      "initial_verification_reasons": [],
+      "reasons": []
+    },
+    {
+      "case": "paraphrase-1",
+      "expected_answer": true,
+      "status": "answered",
+      "answer_style": "extractive",
+      "passed": true,
+      "latency_ms": 3676.14,
+      "stages": {
+        "retrieve": 18.52,
+        "rerank": 351.8,
+        "generate": 2531.34,
+        "verify": 774.23
+      },
+      "claims": 2,
+      "citations": 2,
+      "exact_source_wording": true,
+      "attempts": 1,
+      "output_tokens": 29,
+      "initial_verification_reasons": [],
+      "reasons": []
+    },
+    {
+      "case": "exact-2",
+      "expected_answer": true,
+      "status": "answered",
+      "answer_style": "extractive",
+      "passed": true,
+      "latency_ms": 1458.03,
+      "stages": {
+        "retrieve": 12.53,
+        "rerank": 324.77,
+        "generate": 372.36,
+        "verify": 748.16
+      },
+      "claims": 2,
+      "citations": 2,
+      "exact_source_wording": true,
+      "attempts": 1,
+      "output_tokens": 29,
+      "initial_verification_reasons": [],
+      "reasons": []
+    },
+    {
+      "case": "paraphrase-2",
+      "expected_answer": true,
+      "status": "answered",
+      "answer_style": "extractive",
+      "passed": true,
+      "latency_ms": 2846.88,
+      "stages": {
+        "retrieve": 12.65,
+        "rerank": 320.69,
+        "generate": 1858.63,
+        "verify": 654.73
+      },
+      "claims": 2,
+      "citations": 2,
+      "exact_source_wording": true,
+      "attempts": 1,
+      "output_tokens": 29,
+      "initial_verification_reasons": [],
+      "reasons": []
+    },
+    {
+      "case": "designation",
+      "expected_answer": true,
+      "status": "answered",
+      "answer_style": "extractive",
+      "passed": true,
+      "latency_ms": 3665.09,
+      "stages": {
+        "retrieve": 11.84,
+        "rerank": 327.48,
+        "generate": 2171.14,
+        "verify": 1154.08
+      },
+      "claims": 2,
+      "citations": 2,
+      "exact_source_wording": true,
+      "attempts": 1,
+      "output_tokens": 29,
+      "initial_verification_reasons": [],
+      "reasons": []
+    },
+    {
+      "case": "unknown-1",
+      "expected_answer": false,
+      "status": "abstained",
+      "answer_style": "extractive",
+      "passed": true,
+      "latency_ms": 3284.84,
+      "stages": {
+        "retrieve": 22.16,
+        "rerank": 353.8,
+        "generate": 2907.76,
+        "verify": 0.7
+      },
+      "claims": 0,
+      "citations": 0,
+      "exact_source_wording": true,
+      "attempts": 1,
+      "output_tokens": 19,
+      "initial_verification_reasons": [
+        "model_abstained"
+      ],
+      "reasons": [
+        "model_abstained"
+      ]
+    },
+    {
+      "case": "unknown-2",
+      "expected_answer": false,
+      "status": "abstained",
+      "answer_style": "extractive",
+      "passed": true,
+      "latency_ms": 2594.5,
+      "stages": {
+        "retrieve": 33.11,
+        "rerank": 984.55,
+        "generate": 1574.82,
+        "verify": 0.55
+      },
+      "claims": 0,
+      "citations": 0,
+      "exact_source_wording": true,
+      "attempts": 1,
+      "output_tokens": 19,
+      "initial_verification_reasons": [
+        "model_abstained"
+      ],
+      "reasons": [
+        "model_abstained"
+      ]
+    },
+    {
+      "case": "exact-3",
+      "expected_answer": true,
+      "status": "answered",
+      "answer_style": "extractive",
+      "passed": true,
+      "latency_ms": 2458.31,
+      "stages": {
+        "retrieve": 38.9,
+        "rerank": 475.81,
+        "generate": 355.47,
+        "verify": 1587.53
+      },
+      "claims": 2,
+      "citations": 2,
+      "exact_source_wording": true,
+      "attempts": 1,
+      "output_tokens": 29,
+      "initial_verification_reasons": [],
+      "reasons": []
+    }
+  ],
+  "median_ms": 3065.86
+}

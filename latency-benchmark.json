@@ -1,0 +1,166 @@
+{
+  "scope": "One real indexed question, three alternating runs per non-cache profile. Local warm models; live provider variability applies. No query text or document content retained.",
+  "records": [
+    {
+      "profile": "always-rewrite-batch32",
+      "status": "answered",
+      "cache_hit": false,
+      "latency_ms": 7468.31,
+      "stage_ms": {
+        "rewrite": 2705.14,
+        "retrieve": 27.28,
+        "rerank": 346.64,
+        "generate": 3855.1,
+        "verify": 533.59
+      },
+      "claims": 1,
+      "citations": 1,
+      "provider_attempts": 2,
+      "reasons": []
+    },
+    {
+      "profile": "fallback-rewrite-batch4",
+      "status": "answered",
+      "cache_hit": false,
+      "latency_ms": 1147.89,
+      "stage_ms": {
+        "retrieve": 17.4,
+        "rerank": 341.34,
+        "generate": 361.19,
+        "verify": 427.68
+      },
+      "claims": 1,
+      "citations": 1,
+      "provider_attempts": 1,
+      "reasons": []
+    },
+    {
+      "profile": "always-rewrite-batch32",
+      "status": "answered",
+      "cache_hit": false,
+      "latency_ms": 1482.45,
+      "stage_ms": {
+        "rewrite": 343.66,
+        "retrieve": 22.62,
+        "rerank": 341.61,
+        "generate": 351.99,
+        "verify": 422.3
+      },
+      "claims": 1,
+      "citations": 1,
+      "provider_attempts": 2,
+      "reasons": []
+    },
+    {
+      "profile": "fallback-rewrite-batch4",
+      "status": "answered",
+      "cache_hit": false,
+      "latency_ms": 6672.67,
+      "stage_ms": {
+        "retrieve": 11.8,
+        "rerank": 324.94,
+        "generate": 5895.24,
+        "verify": 440.47
+      },
+      "claims": 1,
+      "citations": 1,
+      "provider_attempts": 2,
+      "reasons": []
+    },
+    {
+      "profile": "always-rewrite-batch32",
+      "status": "answered",
+      "cache_hit": false,
+      "latency_ms": 1478.96,
+      "stage_ms": {
+        "rewrite": 336.16,
+        "retrieve": 28.2,
+        "rerank": 330.59,
+        "generate": 343.67,
+        "verify": 440.07
+      },
+      "claims": 1,
+      "citations": 1,
+      "provider_attempts": 2,
+      "reasons": []
+    },
+    {
+      "profile": "fallback-rewrite-batch4",
+      "status": "answered",
+      "cache_hit": false,
+      "latency_ms": 1099.46,
+      "stage_ms": {
+        "retrieve": 15.15,
+        "rerank": 321.33,
+        "generate": 345.83,
+        "verify": 416.95
+      },
+      "claims": 1,
+      "citations": 1,
+      "provider_attempts": 1,
+      "reasons": []
+    },
+    {
+      "profile": "cache-population",
+      "status": "answered",
+      "cache_hit": false,
+      "latency_ms": 1145.78,
+      "stage_ms": {
+        "cache_lookup": 2.92,
+        "retrieve": 12.52,
+        "rerank": 318.34,
+        "generate": 352.33,
+        "verify": 459.39
+      },
+      "claims": 1,
+      "citations": 1,
+      "provider_attempts": 1,
+      "reasons": []
+    },
+    {
+      "profile": "repeat-query",
+      "status": "answered",
+      "cache_hit": true,
+      "latency_ms": 3.34,
+      "stage_ms": {
+        "cache_lookup": 3.06
+      },
+      "claims": 1,
+      "citations": 1,
+      "provider_attempts": 0,
+      "reasons": []
+    },
+    {
+      "profile": "repeat-query",
+      "status": "answered",
+      "cache_hit": true,
+      "latency_ms": 1.46,
+      "stage_ms": {
+        "cache_lookup": 1.37
+      },
+      "claims": 1,
+      "citations": 1,
+      "provider_attempts": 0,
+      "reasons": []
+    },
+    {
+      "profile": "repeat-query",
+      "status": "answered",
+      "cache_hit": true,
+      "latency_ms": 1.26,
+      "stage_ms": {
+        "cache_lookup": 1.19
+      },
+      "claims": 1,
+      "citations": 1,
+      "provider_attempts": 0,
+      "reasons": []
+    }
+  ],
+  "median_ms": {
+    "cache-population": 1145.78,
+    "always-rewrite-batch32": 1482.45,
+    "repeat-query": 1.46,
+    "fallback-rewrite-batch4": 1147.89
+  }
+}

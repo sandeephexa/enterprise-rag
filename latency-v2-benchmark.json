@@ -1,0 +1,97 @@
+{
+  "scope": "Uncached live pipeline executions with a temporary backup of the indexed corpus. Two question variants plus the exact reported question. All local models loaded; current provider and hardware. Not HTTP/browser/load percentiles. Source content and credentials omitted.",
+  "final_setting": "generation_evidence_mode=spans; compact_evidence_ids=true; generation_reasoning_effort=none; answer_cache_ttl_s=0 during measurement",
+  "records": [
+    {
+      "low_reasoning": true,
+      "status": "answered",
+      "latency_ms": 4929.55,
+      "stage_ms": {
+        "retrieve": 20.63,
+        "rerank": 341.27,
+        "generate": 4033.68,
+        "verify": 533.32
+      },
+      "input_tokens": 2607,
+      "output_tokens": 106,
+      "attempts": 1,
+      "claims": 1,
+      "citations": 4,
+      "reasons": [],
+      "profile": "low"
+    },
+    {
+      "low_reasoning": false,
+      "status": "answered",
+      "latency_ms": 3352.55,
+      "stage_ms": {
+        "retrieve": 19.22,
+        "rerank": 359.78,
+        "generate": 2501.29,
+        "verify": 471.95
+      },
+      "input_tokens": 2607,
+      "output_tokens": 67,
+      "attempts": 1,
+      "claims": 1,
+      "citations": 4,
+      "reasons": [],
+      "profile": "none"
+    },
+    {
+      "low_reasoning": false,
+      "status": "answered",
+      "latency_ms": 2847.24,
+      "stage_ms": {
+        "retrieve": 16.6,
+        "rerank": 348.77,
+        "generate": 2114.25,
+        "verify": 367.41
+      },
+      "input_tokens": 2202,
+      "output_tokens": 66,
+      "attempts": 1,
+      "claims": 1,
+      "citations": 4,
+      "reasons": [],
+      "profile": "none"
+    },
+    {
+      "low_reasoning": true,
+      "status": "answered",
+      "latency_ms": 2891.34,
+      "stage_ms": {
+        "retrieve": 14.64,
+        "rerank": 318.83,
+        "generate": 2172.66,
+        "verify": 384.81
+      },
+      "input_tokens": 2202,
+      "output_tokens": 68,
+      "attempts": 1,
+      "claims": 1,
+      "citations": 4,
+      "reasons": [],
+      "profile": "low"
+    },
+    {
+      "compact_ids": true,
+      "status": "answered",
+      "latency_ms": 3346.87,
+      "stage_ms": {
+        "retrieve": 25.13,
+        "rerank": 340.16,
+        "generate": 2472.71,
+        "verify": 506.65
+      },
+      "input_tokens": 2609,
+      "output_tokens": 68,
+      "attempts": 1,
+      "claims": 1,
+      "citations": 4,
+      "reasons": [],
+      "profile": "none-exact-user-question"
+    }
+  ],
+  "limitations": "Other tested settings had slow provider outliers (generation alone 10.1 seconds). Whole-passage citation references increased repairs and were rejected. No universal latency guarantee or broad quality calibration is established."
+}

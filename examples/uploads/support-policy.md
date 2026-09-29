@@ -1,0 +1,3 @@
+# Support policy
+
+Enterprise support is available 24 hours a day. Tickets receive a response within 2 hours.

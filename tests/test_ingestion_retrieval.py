@@ -121,3 +121,48 @@ async def test_vector_semantics_branch_independent_of_bm25(pipeline, principal):
     assert bm25("car", [["vehicle", "maintenance"]]) == [0]
     hits = pipeline.retriever.candidates(["car"], principal)
     assert hits[0].chunk.document_id == "car"
+
+
+@pytest.mark.parametrize("strategy", ["sentence", "paragraph", "semantic"])
+def test_token_aware_chunks_preserve_every_source_character(settings, strategy):
+    """Dense Unicode/table text can exceed tokens while below the character cap."""
+
+    class LimitedEncoder(DemoEncoder):
+        def fits(self, text):
+            return len(text.encode("utf-8")) + 2 <= 90
+
+        def encode(self, texts):
+            assert all(self.fits(text) for text in texts), "semantic units must fit too"
+            return super().encode(texts)
+
+    encoder = LimitedEncoder()
+    cfg = settings.model_copy(
+        update={"chunk_strategy": strategy, "chunk_chars": 700, "overlap_chars": 80}
+    )
+    text = ("Compensation | ₹123,456.78 | 2026/09/28\n\n" * 12) + "界" * 120
+    doc = Document(
+        id="dense", title="Synthetic table", source="urn:test:dense", text=text, groups=["staff"]
+    )
+    chunks = Chunker(cfg, encoder).split(doc, "test")
+    covered = set()
+    for chunk in chunks:
+        assert encoder.fits(chunk.text)
+        assert chunk.text == text[chunk.start : chunk.end]
+        covered.update(range(chunk.start, chunk.end))
+    assert all(index in covered for index, char in enumerate(text) if not char.isspace())
+    encoder.encode([chunk.text for chunk in chunks])
+
+
+def test_semantic_encoder_uses_tokenizer_limit_with_special_tokens():
+    import threading
+    from types import SimpleNamespace
+
+    from rag.ingestion import SemanticEncoder
+
+    encoder = SemanticEncoder.__new__(SemanticEncoder)
+    encoder.lock = threading.Lock()
+    encoder.model = SimpleNamespace(
+        max_seq_length=6, tokenizer=lambda text, **kwargs: {"input_ids": [0, *text, 1]}
+    )
+    assert encoder.fits("1234")
+    assert not encoder.fits("12345")

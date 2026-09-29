@@ -47,6 +47,7 @@ class Settings(BaseSettings):
     reranker_revision: str | None = "233902d25c440f23af6f7d6e94d2946bac0bee0a"
     nli_model: str = "cross-encoder/nli-deberta-v3-small"
     nli_revision: str | None = "fa2804872c3b4bd748f38c0185cc85775361e735"
+    nli_batch_size: int = Field(default=4, ge=1, le=64)
     nli_entailment_index: int = Field(default=1, ge=0)
     nli_contradiction_index: int = Field(default=0, ge=0)
     local_models_only: bool = False
@@ -64,8 +65,17 @@ class Settings(BaseSettings):
     contradiction_threshold: float = Field(default=0.2, ge=0, le=1)
     context_token_budget: int = Field(default=5000, ge=500)
     model_context_tokens: int = Field(default=16000, ge=2000)
+    answer_style: Literal["extractive", "synthesis"] = "extractive"
+    generation_reasoning_effort: (
+        Literal["none", "minimal", "low", "medium", "high", "xhigh", "max"] | None
+    ) = None
+    generation_evidence_mode: Literal["spans", "quote"] = "spans"
+    compact_evidence_ids: bool = True
     max_output_tokens: int = Field(default=1500, ge=100)
     latency_budget_s: float = Field(default=20, gt=0)
+    rewrite_mode: Literal["fallback", "always", "off"] = "fallback"
+    answer_cache_ttl_s: float = Field(default=60, ge=0, le=3600)
+    answer_cache_max_entries: int = Field(default=128, ge=1, le=1000)
     rewrite_budget_s: float = Field(default=1.5, gt=0)
     retrieval_budget_s: float = Field(default=3, gt=0)
     guard_budget_s: float = Field(default=3, gt=0)
@@ -75,6 +85,10 @@ class Settings(BaseSettings):
     cpu_workers: int = Field(default=2, ge=1, le=8)
     max_concurrent_requests: int = Field(default=8, ge=1)
     max_body_bytes: int = Field(default=1_000_000, ge=1024)
+    max_upload_bytes: int = Field(default=10 * 1024 * 1024, ge=1024, le=50 * 1024 * 1024)
+    max_extracted_chars: int = Field(default=200000, ge=100, le=200000)
+    upload_parse_timeout_s: float = Field(default=30, gt=0, le=60)
+    max_concurrent_uploads: int = Field(default=2, ge=1, le=8)
     otlp_endpoint: str | None = None
     service_name: str = "evidence-rag"
 

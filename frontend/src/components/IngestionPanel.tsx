@@ -1,3 +1,4 @@
+import { FileUploadPanel } from './FileUploadPanel';
 import { useRef, useState } from 'react';
 import { CheckCircle2, FileJson2, FilePlus2, Upload } from 'lucide-react';
 import type { ApiClient } from '../api/client';
@@ -7,7 +8,8 @@ import { SAMPLE_DOCUMENTS } from '../samples';
 import { Badge, Button, ErrorNotice } from './ui';
 
 export function IngestionPanel({ api, authenticated, onConnect }: { api: ApiClient; authenticated: boolean; onConnect: () => void }) {
-  const [mode, setMode] = useState<'form' | 'json'>('form');
+  const [mode, setMode] = useState<'form' | 'json' | 'files'>('files');
+  const [filesBusy, setFilesBusy] = useState(false);
   const [fields, setFields] = useState({ id: '', title: '', source: '', groups: 'staff', text: '' });
   const [json, setJson] = useState('');
   const [validation, setValidation] = useState<string | null>(null);
@@ -29,10 +31,11 @@ export function IngestionPanel({ api, authenticated, onConnect }: { api: ApiClie
     } catch { setValidation('Invalid JSON. Provide an object containing a documents array.'); }
   };
   return <section className="max-w-4xl">
-    <div className="section-heading"><div><div className="eyebrow">BUILD YOUR TEST CORPUS</div><h1>Document ingestion</h1><p className="muted mt-2">Give your next query something to work with.</p></div><Badge tone="accent">POST /ingest</Badge></div>
+    <div className="section-heading"><div><div className="eyebrow">BUILD YOUR TEST CORPUS</div><h1>Document ingestion</h1><p className="muted mt-2">Give your next query something to work with.</p></div><Badge tone="accent">{mode === 'files' ? 'POST /ingest/file' : 'POST /ingest'}</Badge></div>
     <div className="panel">
-      <div className="flex flex-wrap items-center justify-between gap-3 border-b border-line p-5"><div className="segmented" aria-label="Input mode">{(['form', 'json'] as const).map(value => <button key={value} aria-pressed={mode === value} className={mode === value ? 'active' : ''} onClick={() => { setMode(value); setValidation(null); setResult(null); }}>{value === 'form' ? 'Single document' : 'JSON batch'}</button>)}</div><Button onClick={() => { setMode('json'); setJson(JSON.stringify(SAMPLE_DOCUMENTS, null, 2)); setValidation(null); setResult(null); }}><FileJson2 size={15} /> Load sample corpus</Button></div>
-      <form className="space-y-5 p-5 sm:p-7" onSubmit={event => { event.preventDefault(); void submit(); }}>
+      <div className="flex flex-wrap items-center justify-between gap-3 border-b border-line p-5"><div className="segmented" aria-label="Input mode">{(['files', 'form', 'json'] as const).map(value => <button key={value} disabled={filesBusy} aria-pressed={mode === value} className={mode === value ? 'active' : ''} onClick={() => { setMode(value); setValidation(null); setResult(null); }}>{value === 'files' ? 'File upload' : value === 'form' ? 'Paste text' : 'JSON batch'}</button>)}</div><Button disabled={filesBusy} onClick={() => { setMode('json'); setJson(JSON.stringify(SAMPLE_DOCUMENTS, null, 2)); setValidation(null); setResult(null); }}><FileJson2 size={15} /> Load sample corpus</Button></div>
+      <div hidden={mode !== 'files'}><FileUploadPanel api={api} authenticated={authenticated} onConnect={onConnect} onBusy={setFilesBusy} /></div>
+      <form hidden={mode === 'files'} className="space-y-5 p-5 sm:p-7" onSubmit={event => { event.preventDefault(); void submit(); }}>
         {mode === 'form' ? <><div className="grid gap-5 sm:grid-cols-2"><label className="field">Document ID<input value={fields.id} onChange={e => update('id', e.target.value)} placeholder="support-policy" maxLength={100} required /><span>Stable ID; reusing it replaces the document.</span></label><label className="field">Title<input value={fields.title} onChange={e => update('title', e.target.value)} placeholder="Enterprise support policy" maxLength={200} required /></label></div><label className="field">Source<input value={fields.source} onChange={e => update('source', e.target.value)} placeholder="https://docs.example.com/support or urn:acme:support" maxLength={500} required /></label><label className="field">Access groups<input value={fields.groups} onChange={e => update('groups', e.target.value)} placeholder="staff, support" required /><span>Comma-separated. Only matching groups can retrieve this document.</span></label><label className="field">Document text<textarea value={fields.text} onChange={e => update('text', e.target.value)} rows={9} maxLength={200000} placeholder="Paste the source text here. Paragraphs and exact wording are preserved." required /></label></> : <><div className="flex items-center justify-between"><label htmlFor="batch-json" className="label">DOCUMENTS PAYLOAD</label><Button onClick={() => upload.current?.click()}><Upload size={14} /> Import JSON</Button></div><input ref={upload} type="file" accept=".json,application/json" className="hidden" aria-label="Import JSON file" onChange={async e => {
           const file = e.target.files?.[0]; e.target.value = '';
           if (!file) return;

@@ -28,10 +28,11 @@ from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapProp
 
 from .config import Settings
 from .guardrails import DemoEntailment, HallucinationGuard, NeuralEntailment, RejectedInput
-from .ingestion import DemoEncoder, HybridStore, SemanticEncoder
+from .ingestion import DemoEncoder, EmbeddingInputTooLong, HybridStore, SemanticEncoder
 from .pipeline import CPUWorkers, ModelGateway, RAGPipeline
 from .retriever import CrossEncoderRanker, DemoRanker, HybridRetriever
 from .schemas import Answer, IngestRequest, Principal, Query, ReviewDecision
+from .uploads import capabilities, upload_document
 
 LOGGER = logging.getLogger("rag.audit")
 SECURITY = HTTPBearer(auto_error=False)
@@ -42,20 +43,31 @@ def build_pipeline(settings: Settings) -> RAGPipeline:
     encoder = DemoEncoder() if settings.mode == "demo" else SemanticEncoder(settings)
     ranker = DemoRanker() if settings.mode == "demo" else CrossEncoderRanker(settings)
     nli = DemoEntailment() if settings.mode == "demo" else NeuralEntailment(settings)
-    if settings.mode == "live":
-        # Warm up all adapters before readiness, detecting kernel/model incompatibility.
-        encoder.encode(["Service readiness check."])
-        ranker.score([("Service readiness", "Service readiness check.")])
-        nli.scores([("Service is ready.", "Service is ready.")])
-    store = HybridStore(settings, encoder)
-    return RAGPipeline(
-        settings,
-        store,
-        HybridRetriever(settings, store, encoder, ranker),
-        HallucinationGuard(settings, nli),
-        ModelGateway(settings),
-        CPUWorkers(settings.cpu_workers),
-    )
+    workers = CPUWorkers(settings.cpu_workers)
+    try:
+        if settings.mode == "live":
+
+            def warmup() -> None:
+                # Warm the same threads used for real requests, with representative
+                # passage lengths and more than one pair to initialize batched kernels.
+                passage = "Service availability and support procedures are documented. " * 10
+                encoder.encode(["Service readiness check."])
+                ranker.score([("Service readiness", passage)] * 4)
+                nli.scores([(passage, f"Service procedure {i} is documented.") for i in range(4)])
+
+            workers.warmup(warmup)
+        store = HybridStore(settings, encoder)
+        return RAGPipeline(
+            settings,
+            store,
+            HybridRetriever(settings, store, encoder, ranker),
+            HallucinationGuard(settings, nli),
+            ModelGateway(settings),
+            workers,
+        )
+    except BaseException:
+        workers.close()
+        raise
 
 
 def configure_telemetry(settings: Settings) -> tuple[TracerProvider, MeterProvider]:
@@ -97,12 +109,24 @@ class IngressMiddleware:
         path = scope.get("path", "")
         route = (
             path
-            if path in {"/query", "/ingest", "/reviews", "/health/live", "/health/ready"}
+            if path
+            in {
+                "/query",
+                "/ingest",
+                "/ingest/file",
+                "/ingest/formats",
+                "/reviews",
+                "/health/live",
+                "/health/ready",
+            }
             else "/other"
         )
         headers = {k.decode("latin1"): v.decode("latin1") for k, v in scope.get("headers", [])}
         parent = TraceContextTextMapPropagator().extract(headers)
         status = 500
+        is_upload = path == "/ingest/file"
+        body_limit = settings.max_upload_bytes + 65536 if is_upload else settings.max_body_bytes
+        upload_slot = False
         with trace.get_tracer(__name__).start_as_current_span(
             "http.request",
             context=parent,
@@ -123,23 +147,32 @@ class IngressMiddleware:
                 await send(message)
 
             try:
+                if is_upload:
+                    try:
+                        await asyncio.wait_for(scope["app"].state.upload_slots.acquire(), 0.05)
+                        upload_slot = True
+                    except TimeoutError:
+                        await JSONResponse({"detail": "Upload service busy"}, status_code=503)(
+                            scope, receive, wrapped_send
+                        )
+                        return
                 try:
                     declared = int(headers.get("content-length", "0"))
                 except ValueError:
                     declared = -1
-                if declared < 0 or declared > settings.max_body_bytes:
+                if declared < 0 or declared > body_limit:
                     await JSONResponse({"detail": "Invalid or oversized body"}, status_code=413)(
                         scope, receive, wrapped_send
                     )
                     return
                 body = bytearray()
-                async with asyncio.timeout(5):
+                async with asyncio.timeout(30 if is_upload else 5):
                     while True:
                         message = await receive()
                         if message["type"] == "http.disconnect":
                             return
                         body.extend(message.get("body", b""))
-                        if len(body) > settings.max_body_bytes:
+                        if len(body) > body_limit:
                             await JSONResponse(
                                 {"detail": "Request body too large"}, status_code=413
                             )(scope, receive, wrapped_send)
@@ -161,6 +194,8 @@ class IngressMiddleware:
                     scope, receive, wrapped_send
                 )
             finally:
+                if upload_slot:
+                    scope["app"].state.upload_slots.release()
                 span.set_attribute("http.request.method", scope["method"])
                 span.set_attribute("http.route", route)
                 span.set_attribute("http.response.status_code", status)
@@ -239,6 +274,7 @@ def create_app(
         providers = configure_telemetry(config) if telemetry else ()
         application.state.pipeline = pipeline or await asyncio.to_thread(build_pipeline, config)
         application.state.slots = asyncio.Semaphore(config.max_concurrent_requests)
+        application.state.upload_slots = asyncio.Semaphore(config.max_concurrent_uploads)
         application.state.rate_windows = defaultdict(deque)
         try:
             yield
@@ -258,6 +294,18 @@ def create_app(
     @application.exception_handler(RejectedInput)
     async def policy_error(_request: Request, _exc: RejectedInput):
         return JSONResponse({"detail": "Content requires security review"}, status_code=400)
+
+    @application.exception_handler(EmbeddingInputTooLong)
+    async def embedding_limit(_request: Request, _exc: EmbeddingInputTooLong):
+        return JSONResponse(
+            {
+                "detail": {
+                    "code": "embedding_token_limit",
+                    "message": "An input exceeds the embedding model token limit. Shorten the query or check the model's token-limit configuration; document chunks are split automatically.",
+                }
+            },
+            status_code=422,
+        )
 
     @application.exception_handler(ValueError)
     async def invalid_data(_request: Request, _exc: ValueError):
@@ -281,7 +329,12 @@ def create_app(
                 db.execute("SELECT 1").fetchone()
 
         await request.app.state.pipeline.workers.run(probe, timeout=1)
-        return {"status": "ready", "mode": request.app.state.settings.mode}
+        return {
+            "status": "ready",
+            "mode": request.app.state.settings.mode,
+            "pipeline_revision": "source-selection-v1",
+            "answer_style": request.app.state.settings.answer_style,
+        }
 
     @application.post("/query", response_model=Answer)
     async def query_endpoint(
@@ -302,6 +355,31 @@ def create_app(
             service.store.ingest, batch.documents, principal, timeout=120
         )
         return {"indexed_chunks": count}
+
+    @application.get("/ingest/formats")
+    async def upload_formats(request: Request):
+        return capabilities(request.app.state.settings)
+
+    @application.post("/ingest/file")
+    async def file_endpoint(
+        request: Request,
+        principal: Annotated[Principal, Depends(require("ingest"))],
+        service: Annotated[RAGPipeline, Depends(pipeline_dependency)],
+    ):
+        document, warnings = await upload_document(request, request.app.state.settings, principal)
+        with trace.get_tracer(__name__).start_as_current_span(
+            "ingest.index", record_exception=False, set_status_on_exception=False
+        ):
+            count = await service.workers.run(
+                service.store.ingest, [document], principal, timeout=120
+            )
+        return {
+            "document_id": document.id,
+            "source": document.source,
+            "indexed_chunks": count,
+            "extracted_characters": len(document.text),
+            "warnings": warnings,
+        }
 
     @application.delete("/documents/{document_id}")
     async def delete_endpoint(

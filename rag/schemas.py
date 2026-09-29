@@ -73,6 +73,31 @@ class Generation(StrictModel):
     abstain: bool
 
 
+class EvidenceSelection(StrictModel):
+    """Provider selects source sentences; it cannot invent released answer wording."""
+
+    source_ids: list[str] = Field(max_length=8)
+    abstain: bool
+
+    @model_validator(mode="after")
+    def consistent(self) -> "EvidenceSelection":
+        if self.abstain == bool(self.source_ids):
+            raise ValueError("Select sources for an answer, or abstain with no sources")
+        return self
+
+
+class ReferencedClaim(StrictModel):
+    """Compact provider-only contract; public claims still carry verified evidence."""
+
+    text: str = Field(min_length=1, max_length=1200)
+    source_ids: list[str] = Field(min_length=1, max_length=4)
+
+
+class ReferencedGeneration(StrictModel):
+    claims: list[ReferencedClaim] = Field(max_length=8)
+    abstain: bool
+
+
 class Rewrite(StrictModel):
     queries: list[str] = Field(min_length=1, max_length=2)
 
@@ -113,6 +138,9 @@ class Usage(StrictModel):
 
 
 class Answer(StrictModel):
+    answer_style: Literal["extractive", "synthesis"] = "synthesis"
+    initial_verification_reasons: list[str] = Field(default_factory=list)
+    cache_hit: bool = False
     request_id: str
     trace_id: str
     status: Literal["answered", "abstained", "review"]
