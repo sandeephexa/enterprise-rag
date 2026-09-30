@@ -23,8 +23,9 @@ export function FileUploadPanel({ api, authenticated, onConnect, onBusy }: {
   const controller = useRef<AbortController | null>(null);
   useEffect(() => {
     const abort = new AbortController();
+    setLimits(null);
     setLimitsError(null);
-    void api.uploadLimits(abort.signal).then(setLimits).catch(error => {
+    void api.uploadLimits(abort.signal).then(result => { if (!abort.signal.aborted) setLimits(result); }).catch(error => {
       if (!abort.signal.aborted) setLimitsError(`${errorMessage(error)} Restart the backend after installing the upload dependencies.`);
     });
     return () => abort.abort();
@@ -66,7 +67,13 @@ export function FileUploadPanel({ api, authenticated, onConnect, onBusy }: {
         update(entry.id, { status: 'uploading', progress: 0, error: undefined });
         try {
           const result = await api.uploadFile(entry.file, accessGroups, entry.documentId, progress => {
-            update(entry.id, { progress, status: progress === 100 ? 'processing' : 'uploading' });
+            if (abort.signal.aborted) return;
+            const status = progress === 100 ? 'processing' : 'uploading';
+            setEntries(previous => {
+              const current = previous.find(item => item.id === entry.id);
+              if (!current || (current.progress === progress && current.status === status)) return previous;
+              return previous.map(item => item.id === entry.id ? { ...item, progress, status } : item);
+            });
           }, abort.signal);
           update(entry.id, { status: 'indexed', result, progress: 100 });
         } catch (error) {

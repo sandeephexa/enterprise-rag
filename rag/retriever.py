@@ -1,8 +1,9 @@
 """Dual retrieval, reciprocal-rank fusion, cross-encoding and adaptive context selection."""
 
+import heapq
 import math
 import threading
-from collections import Counter
+from collections import Counter, defaultdict
 from collections.abc import Sequence
 from typing import Protocol
 
@@ -63,22 +64,32 @@ class CrossEncoderRanker:
             return scores.tolist()
 
 
+class BM25Index:
+    """Request-scoped lexical statistics reused by the original query and rewrites."""
+
+    def __init__(self, corpus: list[list[str]]) -> None:
+        self.size = len(corpus)
+        self.postings: dict[str, list[tuple[int, int]]] = defaultdict(list)
+        average = sum(map(len, corpus)) / len(corpus) if corpus else 1
+        self.norms = [1.5 * (0.25 + 0.75 * len(doc) / (average or 1)) for doc in corpus]
+        for index, document in enumerate(corpus):
+            for term, count in Counter(document).items():
+                self.postings[term].append((index, count))
+
+    def score(self, query: str) -> list[float]:
+        scores = [0.0] * self.size
+        for term in set(words(query)):
+            postings = self.postings.get(term, ())
+            count = len(postings)
+            idf = math.log(1 + (self.size - count + 0.5) / (count + 0.5))
+            for index, frequency in postings:
+                scores[index] += idf * frequency * 2.5 / (frequency + self.norms[index])
+        return scores
+
+
 def bm25(query: str, corpus: list[list[str]]) -> list[float]:
     """Okapi BM25 with positive Robertson IDF, k1=1.5 and b=0.75."""
-    if not corpus:
-        return []
-    frequency = Counter(word for doc in corpus for word in set(doc))
-    average = sum(map(len, corpus)) / len(corpus) or 1
-    scores = []
-    for document in corpus:
-        counts = Counter(document)
-        score = 0.0
-        for term in set(words(query)):
-            n, tf = frequency[term], counts[term]
-            idf = math.log(1 + (len(corpus) - n + 0.5) / (n + 0.5))
-            score += idf * tf * 2.5 / (tf + 1.5 * (0.25 + 0.75 * len(document) / average))
-        scores.append(score)
-    return scores
+    return BM25Index(corpus).score(query)
 
 
 class HybridRetriever:
@@ -94,14 +105,17 @@ class HybridRetriever:
         query_vectors = self.encoder.encode(queries)
         if vectors.shape[1] != query_vectors.shape[1]:
             raise ValueError("Index dimension mismatch")
+        lexical = BM25Index(corpus)
         fusion: Counter[int] = Counter()
         for query, vector in zip(queries, query_vectors, strict=True):
-            rankings = [list(vectors @ vector), bm25(query, corpus)]
+            rankings = [vectors @ vector, lexical.score(query)]
             for scores in rankings:
-                order = sorted(range(len(scores)), key=lambda idx: (-scores[idx], chunks[idx].id))
-                for rank, idx in enumerate(
-                    [i for i in order if scores[i] > 0][: self.settings.candidate_k], 1
-                ):
+                order = heapq.nsmallest(
+                    self.settings.candidate_k,
+                    (i for i, score in enumerate(scores) if score > 0),
+                    key=lambda idx: (-scores[idx], chunks[idx].id),
+                )
+                for rank, idx in enumerate(order, 1):
                     fusion[idx] += 1 / (60 + rank)
         order = sorted(fusion, key=lambda idx: (-fusion[idx], chunks[idx].id))[
             : self.settings.candidate_k

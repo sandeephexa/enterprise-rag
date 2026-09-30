@@ -60,7 +60,7 @@ async def test_update_delete_and_embedding_identity(pipeline, document, principa
     encoder.identity = "incompatible"
     with pytest.raises(ValueError, match="identity"):
         HybridStore(settings, encoder)
-    assert pipeline.store.delete(document.id, principal.tenant) == 1
+    assert pipeline.store.delete(document.id, principal) == 1
     assert not pipeline.store.snapshot(principal)[0]
 
 

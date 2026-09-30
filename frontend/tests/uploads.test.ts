@@ -68,3 +68,27 @@ describe('upload validation and multipart client', () => {
     expect(FakeXHR.latest.body).toBeUndefined();
   });
 });
+
+describe('upload cleanup', () => {
+  it('detaches handlers after completion', async () => {
+    vi.stubGlobal('XMLHttpRequest', FakeXHR);
+    const signal = new AbortController().signal;
+    const remove = vi.spyOn(signal, 'removeEventListener');
+    const promise = new ApiClient('').uploadFile(new File(['text'], 'resume.txt'), ['staff'], '', vi.fn(), signal);
+    const xhr = FakeXHR.latest;
+    xhr.onload?.();
+    await expect(promise).resolves.toEqual(result);
+    expect(remove).toHaveBeenCalledWith('abort', expect.any(Function));
+    expect(xhr.upload.onprogress).toBeNull();
+    expect(xhr.onload).toBeNull();
+  });
+  it('cleans up a synchronous upload send failure', async () => {
+    class FailingXHR extends FakeXHR { send() { throw new Error('transport detail'); } }
+    vi.stubGlobal('XMLHttpRequest', FailingXHR);
+    const signal = new AbortController().signal;
+    const remove = vi.spyOn(signal, 'removeEventListener');
+    await expect(new ApiClient('').uploadFile(new File(['text'], 'resume.txt'), ['staff'], '', vi.fn(), signal)).rejects.toThrow('Could not start');
+    expect(remove).toHaveBeenCalledWith('abort', expect.any(Function));
+    expect(FakeXHR.latest.onerror).toBeNull();
+  });
+});

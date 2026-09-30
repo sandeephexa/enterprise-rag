@@ -2,6 +2,7 @@
 
 from pathlib import Path
 from typing import Literal
+from urllib.parse import urlsplit
 
 from pydantic import BaseModel, Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -19,6 +20,8 @@ class AccessKey(BaseModel):
 class Endpoint(BaseModel):
     """A Responses-compatible endpoint and operator-supplied price schedule."""
 
+    model_config = {"allow_inf_nan": False}
+
     name: str
     base_url: str = "https://api.openai.com/v1"
     api_key: SecretStr
@@ -28,15 +31,32 @@ class Endpoint(BaseModel):
 
     @model_validator(mode="after")
     def secure_url(self) -> "Endpoint":
-        if not self.base_url.startswith("https://"):
-            raise ValueError("Model endpoints must use HTTPS")
+        try:
+            url = urlsplit(self.base_url)
+            port = url.port
+        except ValueError as exc:
+            raise ValueError("Invalid model endpoint URL") from exc
+        if (
+            url.scheme != "https"
+            or not url.hostname
+            or url.username is not None
+            or url.password is not None
+            or url.query
+            or url.fragment
+            or port == 0
+        ):
+            raise ValueError(
+                "Model endpoints require an HTTPS URL without credentials, query or fragment"
+            )
         return self
 
 
 class Settings(BaseSettings):
     """Fail closed on missing production credentials and inconsistent budgets."""
 
-    model_config = SettingsConfigDict(env_prefix="RAG_", env_file=".env", extra="ignore")
+    model_config = SettingsConfigDict(
+        env_prefix="RAG_", env_file=".env", extra="ignore", allow_inf_nan=False
+    )
     mode: Literal["live", "demo"] = "live"
     database_path: Path = Path("data/rag.sqlite3")
     access_keys: list[AccessKey] = Field(default_factory=list)

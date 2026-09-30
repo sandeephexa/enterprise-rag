@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { memo, useEffect, useRef, useState } from 'react';
 import { ArrowUpRight, FileText, ScanSearch, Timer, Fingerprint } from 'lucide-react';
 import type { Answer, Citation } from '../api/schemas';
 import { Badge, CopyButton, duration, safeSource, Skeleton, usd } from './ui';
@@ -8,11 +8,14 @@ function Highlight({ text, quote }: { text: string; quote?: string }) {
   return <p className="whitespace-pre-wrap break-words leading-7">{start < 0 || !quote ? text : <>{text.slice(0, start)}<mark>{quote}</mark>{text.slice(start + quote.length)}</>}</p>;
 }
 
-export function Inspector({ answer, pending, citation }: { answer?: Answer; pending?: boolean; citation?: Citation | null }) {
+export const Inspector = memo(function Inspector({ answer, pending, citation }: { answer?: Answer; pending?: boolean; citation?: Citation | null }) {
   const [tab, setTab] = useState<'evidence' | 'metrics'>('evidence');
   const focused = useRef<HTMLDivElement>(null);
   useEffect(() => {
-    if (citation) { setTab('evidence'); requestAnimationFrame(() => focused.current?.scrollIntoView({ behavior: 'smooth', block: 'nearest' })); }
+    if (!citation) return;
+    setTab('evidence');
+    const frame = requestAnimationFrame(() => focused.current?.scrollIntoView({ behavior: 'smooth', block: 'nearest' }));
+    return () => cancelAnimationFrame(frame);
   }, [citation]);
   const stages = Object.entries(answer?.stage_ms ?? {});
   const totalStages = Math.max(1, stages.reduce((sum, [, ms]) => sum + ms, 0));
@@ -40,10 +43,10 @@ export function Inspector({ answer, pending, citation }: { answer?: Answer; pend
       {answer.cache_hit && <p className="text-xs leading-5 text-accent">Verified answer reused from cache. Latency and usage describe this request; no model calls were made. Citations refer to the unchanged indexed sources.</p>}
       {answer.answer_style === 'extractive' && <p className="text-xs leading-5 muted">The model selected relevant source sentences. Answer wording comes directly from the document; citations and grounding checks still apply.</p>}
       {!!answer.initial_verification_reasons?.length && <p className="text-xs leading-5 muted">Initial verification: {answer.initial_verification_reasons.map(reason => reason.replaceAll('_', ' ')).join(', ')}. See the final outcome for the result after recovery.</p>}
-      {answer.mode === 'demo'   && <p className="text-xs leading-5 muted">Demo faithfulness checks exact extracts. These results do not measure live model quality.</p>}
+      {answer.mode === 'demo' && <p className="text-xs leading-5 muted">Demo faithfulness checks exact extracts. These results do not measure live model quality.</p>}
       <section><h3 className="label mb-4">STAGE LATENCY</h3><div className="space-y-4">{stages.map(([name, ms]) => <div key={name}><div className="mb-2 flex justify-between text-xs"><span className="capitalize">{name.replaceAll('_', ' ')}</span><span className="muted tabular-nums">{duration(ms)}</span></div><div className="stage-track"><div style={{ width: `${Math.max(1, ms / totalStages * 100)}%` }} /></div></div>)}</div><p className="mt-3 text-xs muted">Share of measured stage time; excludes other overhead.</p></section>
       <section><h3 className="label mb-3">USAGE & COST</h3><dl className="metric-list"><div><dt>Input tokens</dt><dd>{answer.usage.input_tokens.toLocaleString()}</dd></div><div><dt>Output tokens</dt><dd>{answer.usage.output_tokens.toLocaleString()}</dd></div><div><dt>Provider attempts</dt><dd>{answer.usage.attempts}</dd></div><div><dt>Known model cost</dt><dd>{usd(answer.usage.known_cost_usd)}</dd></div><div><dt>Reserved uncertain cost</dt><dd>{usd(answer.usage.reserved_cost_usd)}</dd></div><div><dt>Uncertain attempts</dt><dd>{answer.usage.uncertain_attempts}</dd></div></dl><p className="mt-3 text-xs leading-5 muted">Known cost excludes local compute. Reservations are estimates, not confirmed charges.</p></section>
       <section className="border-t border-line pt-4"><h3 className="label mb-3 flex items-center gap-2"><Fingerprint size={15} /> TRACE</h3>{[['Trace ID', answer.trace_id], ['Request ID', answer.request_id]].map(([label, value]) => <div className="mb-3" key={label}><div className="flex items-center justify-between text-xs muted"><span>{label}</span><CopyButton value={value} label={`Copy ${label}`} /></div><p className="font-mono text-xs break-all">{value}</p></div>)}</section>
     </div>}
   </aside>;
-}
+});

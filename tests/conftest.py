@@ -12,6 +12,7 @@ TOKEN = "test-only-token-with-at-least-24-characters"
 @pytest.fixture
 def settings(tmp_path):
     return Settings(
+        _env_file=None,
         mode="demo",
         generation_evidence_mode="quote",
         answer_style="synthesis",

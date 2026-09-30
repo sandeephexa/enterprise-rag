@@ -81,7 +81,7 @@ flowchart TD
 - Unknown billing after timeout: reserve the conservative attempt estimate and increment `uncertain_attempts`. Known cost is never presented as a complete invoice when uncertainty remains. Prices must be operator-maintained; caching discounts are not assumed.
 - Index failure or embedding mismatch: reject inconsistent startup/index operations. Document replacements and capacity failures roll back atomically. Deleting a document removes both representations.
 - Prompt injection or malicious payload: schema and byte limits, control-character/pattern checks, untrusted-data prompts, no tool execution, and output verification provide defense in depth. Pattern filtering is intentionally limited and cannot establish that arbitrary text is safe. Domain-specific moderation and adversarial tests remain necessary.
-- Tenant leakage: tenant comes from the server-owned bearer credential, never the query body. Group filtering happens before both retrieval algorithms. Review access requires the tenant and all originating groups.
+- Tenant leakage: tenant comes from the server-owned bearer credential, never the query body. Group filtering happens before both retrieval algorithms. Ingestion can assign only the caller’s groups; overwrite/delete require all existing document groups inside the transaction. Review access requires the tenant and all originating groups, and the 100-record cap applies after authorization.
 - Overload: per-key request windows and bounded concurrent work return 429/503. These limits are process-local; distributed quotas belong at the gateway.
 - Review persistence failure: return a dependency failure instead of claiming that review was queued. Decisions are recorded with reviewer identity and time; approval does not automatically publish an answer.
 
@@ -190,7 +190,7 @@ Trace/metric providers use OTLP/HTTP exporters and batch/periodic export. See [O
 
 # Complete Python implementation
 
-Source modules are authoritative.
+The source files are authoritative. This snapshot accompanies the downloadable project.
 
 ## rag/config.py
 
@@ -199,6 +199,7 @@ Source modules are authoritative.
 
 from pathlib import Path
 from typing import Literal
+from urllib.parse import urlsplit
 
 from pydantic import BaseModel, Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -216,6 +217,8 @@ class AccessKey(BaseModel):
 class Endpoint(BaseModel):
     """A Responses-compatible endpoint and operator-supplied price schedule."""
 
+    model_config = {"allow_inf_nan": False}
+
     name: str
     base_url: str = "https://api.openai.com/v1"
     api_key: SecretStr
@@ -225,15 +228,32 @@ class Endpoint(BaseModel):
 
     @model_validator(mode="after")
     def secure_url(self) -> "Endpoint":
-        if not self.base_url.startswith("https://"):
-            raise ValueError("Model endpoints must use HTTPS")
+        try:
+            url = urlsplit(self.base_url)
+            port = url.port
+        except ValueError as exc:
+            raise ValueError("Invalid model endpoint URL") from exc
+        if (
+            url.scheme != "https"
+            or not url.hostname
+            or url.username is not None
+            or url.password is not None
+            or url.query
+            or url.fragment
+            or port == 0
+        ):
+            raise ValueError(
+                "Model endpoints require an HTTPS URL without credentials, query or fragment"
+            )
         return self
 
 
 class Settings(BaseSettings):
     """Fail closed on missing production credentials and inconsistent budgets."""
 
-    model_config = SettingsConfigDict(env_prefix="RAG_", env_file=".env", extra="ignore")
+    model_config = SettingsConfigDict(
+        env_prefix="RAG_", env_file=".env", extra="ignore", allow_inf_nan=False
+    )
     mode: Literal["live", "demo"] = "live"
     database_path: Path = Path("data/rag.sqlite3")
     access_keys: list[AccessKey] = Field(default_factory=list)
@@ -697,6 +717,10 @@ class Chunker:
         return chunks
 
 
+class DocumentAccessDenied(PermissionError):
+    """The principal cannot assign or mutate the document access groups."""
+
+
 class HybridStore:
     """SQLite vector store + persisted lexical postings for bounded enterprise corpora.
 
@@ -722,6 +746,10 @@ class HybridStore:
                     payload TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'pending',
                     decision TEXT, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
             """)
+            db.execute(
+                "CREATE INDEX IF NOT EXISTS reviews_tenant_created "
+                "ON reviews(tenant,created_at DESC,request_id DESC)"
+            )
             identity = "schema-v1:" + encoder.identity
             row = db.execute("SELECT value FROM metadata WHERE key='identity'").fetchone()
             if row and row[0] != identity:
@@ -742,10 +770,14 @@ class HybridStore:
         """Build everything before one transaction; failure preserves the previous index."""
         from .guardrails import validate_document
 
+        allowed_groups = set(principal.groups)
+        chunker = Chunker(self.settings, self.encoder)
         chunks: list[Chunk] = []
         for document in documents:
+            if not set(document.groups).issubset(allowed_groups):
+                raise DocumentAccessDenied("Document access denied")
             validate_document(document)
-            chunks.extend(Chunker(self.settings, self.encoder).split(document, principal.tenant))
+            chunks.extend(chunker.split(document, principal.tenant))
         if not chunks:
             raise ValueError("No indexable content")
         vectors = self.encoder.encode([chunk.text for chunk in chunks])
@@ -754,6 +786,7 @@ class HybridStore:
         with self.connect() as db:
             db.execute("BEGIN IMMEDIATE")
             for document in documents:
+                self._authorize_mutation(db, document.id, principal)
                 db.execute(
                     "DELETE FROM chunks WHERE tenant=? AND document_id=?",
                     (principal.tenant, document.id),
@@ -806,22 +839,37 @@ class HybridStore:
                 (principal.tenant,),
             ).fetchall()
         chunks, vectors, tokens = [], [], []
+        allowed_groups = set(principal.groups)
         for payload, vector, lexical in rows:
             chunk = Chunk.model_validate_json(payload)
-            if set(chunk.groups).intersection(principal.groups):
+            if allowed_groups.intersection(chunk.groups):
                 chunks.append(chunk)
-                vectors.append(np.frombuffer(vector, dtype=np.float32).copy())
+                vectors.append(np.frombuffer(vector, dtype=np.float32))
                 tokens.append(json.loads(lexical))
         return chunks, np.stack(vectors) if vectors else np.empty((0, 0), dtype=np.float32), tokens
 
-    def delete(self, document_id: str, tenant: str) -> int:
+    @staticmethod
+    def _authorize_mutation(db: sqlite3.Connection, document_id: str, principal: Principal) -> None:
+        """Require authority over every existing group, within the write transaction."""
+        allowed = set(principal.groups)
+        rows = db.execute(
+            "SELECT payload FROM chunks WHERE tenant=? AND document_id=?",
+            (principal.tenant, document_id),
+        )
+        for (payload,) in rows:
+            if not set(json.loads(payload)["groups"]).issubset(allowed):
+                raise DocumentAccessDenied("Document access denied")
+
+    def delete(self, document_id: str, principal: Principal) -> int:
         with self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            self._authorize_mutation(db, document_id, principal)
             count = db.execute(
                 "DELETE FROM chunks WHERE tenant=? AND document_id=?",
-                (tenant, document_id),
+                (principal.tenant, document_id),
             ).rowcount
             if count:
-                self._bump_revision(db, tenant)
+                self._bump_revision(db, principal.tenant)
             return count
 
     def save_review(
@@ -853,22 +901,29 @@ class HybridStore:
             )
 
     def reviews(self, principal: Principal) -> list[dict]:
+        """Return the newest 100 authorized records without materializing the full queue."""
+        allowed = set(principal.groups)
+        records = []
         with self.connect() as db:
             rows = db.execute(
-                "SELECT request_id,groups_json,payload,state,decision FROM reviews WHERE tenant=? ORDER BY created_at DESC LIMIT 100",
+                "SELECT request_id,groups_json,payload,state,decision FROM reviews "
+                "WHERE tenant=? ORDER BY created_at DESC,request_id DESC",
                 (principal.tenant,),
-            ).fetchall()
-        # Require all originating groups to avoid exposing combined-context reviews.
-        return [
-            {
-                "request_id": rid,
-                "answer": json.loads(payload),
-                "state": state,
-                "decision": json.loads(decision) if decision else None,
-            }
-            for rid, groups, payload, state, decision in rows
-            if set(json.loads(groups)).issubset(principal.groups)
-        ]
+            )
+            for rid, groups, payload, state, decision in rows:
+                if not set(json.loads(groups)).issubset(allowed):
+                    continue
+                records.append(
+                    {
+                        "request_id": rid,
+                        "answer": json.loads(payload),
+                        "state": state,
+                        "decision": json.loads(decision) if decision else None,
+                    }
+                )
+                if len(records) == 100:
+                    break
+        return records
 
     def decide(self, request_id: str, decision: ReviewDecision, principal: Principal) -> bool:
         with self.connect() as db:
@@ -902,9 +957,10 @@ class HybridStore:
 ```python
 """Dual retrieval, reciprocal-rank fusion, cross-encoding and adaptive context selection."""
 
+import heapq
 import math
 import threading
-from collections import Counter
+from collections import Counter, defaultdict
 from collections.abc import Sequence
 from typing import Protocol
 
@@ -965,22 +1021,32 @@ class CrossEncoderRanker:
             return scores.tolist()
 
 
+class BM25Index:
+    """Request-scoped lexical statistics reused by the original query and rewrites."""
+
+    def __init__(self, corpus: list[list[str]]) -> None:
+        self.size = len(corpus)
+        self.postings: dict[str, list[tuple[int, int]]] = defaultdict(list)
+        average = sum(map(len, corpus)) / len(corpus) if corpus else 1
+        self.norms = [1.5 * (0.25 + 0.75 * len(doc) / (average or 1)) for doc in corpus]
+        for index, document in enumerate(corpus):
+            for term, count in Counter(document).items():
+                self.postings[term].append((index, count))
+
+    def score(self, query: str) -> list[float]:
+        scores = [0.0] * self.size
+        for term in set(words(query)):
+            postings = self.postings.get(term, ())
+            count = len(postings)
+            idf = math.log(1 + (self.size - count + 0.5) / (count + 0.5))
+            for index, frequency in postings:
+                scores[index] += idf * frequency * 2.5 / (frequency + self.norms[index])
+        return scores
+
+
 def bm25(query: str, corpus: list[list[str]]) -> list[float]:
     """Okapi BM25 with positive Robertson IDF, k1=1.5 and b=0.75."""
-    if not corpus:
-        return []
-    frequency = Counter(word for doc in corpus for word in set(doc))
-    average = sum(map(len, corpus)) / len(corpus) or 1
-    scores = []
-    for document in corpus:
-        counts = Counter(document)
-        score = 0.0
-        for term in set(words(query)):
-            n, tf = frequency[term], counts[term]
-            idf = math.log(1 + (len(corpus) - n + 0.5) / (n + 0.5))
-            score += idf * tf * 2.5 / (tf + 1.5 * (0.25 + 0.75 * len(document) / average))
-        scores.append(score)
-    return scores
+    return BM25Index(corpus).score(query)
 
 
 class HybridRetriever:
@@ -996,14 +1062,17 @@ class HybridRetriever:
         query_vectors = self.encoder.encode(queries)
         if vectors.shape[1] != query_vectors.shape[1]:
             raise ValueError("Index dimension mismatch")
+        lexical = BM25Index(corpus)
         fusion: Counter[int] = Counter()
         for query, vector in zip(queries, query_vectors, strict=True):
-            rankings = [list(vectors @ vector), bm25(query, corpus)]
+            rankings = [vectors @ vector, lexical.score(query)]
             for scores in rankings:
-                order = sorted(range(len(scores)), key=lambda idx: (-scores[idx], chunks[idx].id))
-                for rank, idx in enumerate(
-                    [i for i in order if scores[i] > 0][: self.settings.candidate_k], 1
-                ):
+                order = heapq.nsmallest(
+                    self.settings.candidate_k,
+                    (i for i, score in enumerate(scores) if score > 0),
+                    key=lambda idx: (-scores[idx], chunks[idx].id),
+                )
+                for rank, idx in enumerate(order, 1):
                     fusion[idx] += 1 / (60 + rank)
         order = sorted(fusion, key=lambda idx: (-fusion[idx], chunks[idx].id))[
             : self.settings.candidate_k
@@ -2482,7 +2551,7 @@ import sqlite3
 import time
 import uuid
 from collections import defaultdict, deque
-from contextlib import asynccontextmanager
+from contextlib import AsyncExitStack, asynccontextmanager
 from typing import Annotated, Any
 
 from fastapi import Depends, FastAPI, HTTPException, Request
@@ -2501,7 +2570,13 @@ from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapProp
 
 from .config import Settings
 from .guardrails import DemoEntailment, HallucinationGuard, NeuralEntailment, RejectedInput
-from .ingestion import DemoEncoder, EmbeddingInputTooLong, HybridStore, SemanticEncoder
+from .ingestion import (
+    DemoEncoder,
+    DocumentAccessDenied,
+    EmbeddingInputTooLong,
+    HybridStore,
+    SemanticEncoder,
+)
 from .pipeline import CPUWorkers, ModelGateway, RAGPipeline
 from .retriever import CrossEncoderRanker, DemoRanker, HybridRetriever
 from .schemas import Answer, IngestRequest, Principal, Query, ReviewDecision
@@ -2597,6 +2672,7 @@ class IngressMiddleware:
         headers = {k.decode("latin1"): v.decode("latin1") for k, v in scope.get("headers", [])}
         parent = TraceContextTextMapPropagator().extract(headers)
         status = 500
+        response_started = False
         is_upload = path == "/ingest/file"
         body_limit = settings.max_upload_bytes + 65536 if is_upload else settings.max_body_bytes
         upload_slot = False
@@ -2609,8 +2685,9 @@ class IngressMiddleware:
         ) as span:
 
             async def wrapped_send(message: dict) -> None:
-                nonlocal status
+                nonlocal status, response_started
                 if message["type"] == "http.response.start":
+                    response_started = True
                     status = message["status"]
                     message["headers"] = list(message.get("headers", [])) + [
                         (b"x-request-id", request_id.encode()),
@@ -2664,6 +2741,22 @@ class IngressMiddleware:
                 await self.app(scope, replay, wrapped_send)
             except TimeoutError:
                 await JSONResponse({"detail": "Request timed out"}, status_code=408)(
+                    scope, receive, wrapped_send
+                )
+            except Exception as exc:
+                LOGGER.error(
+                    json.dumps(
+                        {
+                            "event": "http_error",
+                            "request_id": request_id,
+                            "trace_id": f"{span.get_span_context().trace_id:032x}",
+                            "error_type": type(exc).__name__,
+                        }
+                    )
+                )
+                if response_started:
+                    raise
+                await JSONResponse({"detail": "Internal service error"}, status_code=500)(
                     scope, receive, wrapped_send
                 )
             finally:
@@ -2744,18 +2837,18 @@ def create_app(
     async def lifespan(application: FastAPI):
         config = settings or Settings()
         application.state.settings = config
-        providers = configure_telemetry(config) if telemetry else ()
-        application.state.pipeline = pipeline or await asyncio.to_thread(build_pipeline, config)
-        application.state.slots = asyncio.Semaphore(config.max_concurrent_requests)
-        application.state.upload_slots = asyncio.Semaphore(config.max_concurrent_uploads)
-        application.state.rate_windows = defaultdict(deque)
-        try:
-            yield
-        finally:
-            await application.state.pipeline.gateway.close()
-            await asyncio.to_thread(application.state.pipeline.workers.close)
+        async with AsyncExitStack() as cleanup:
+            providers = configure_telemetry(config) if telemetry else ()
             for provider in providers:
-                await asyncio.to_thread(provider.shutdown)
+                cleanup.push_async_callback(asyncio.to_thread, provider.shutdown)
+            service = pipeline or await asyncio.to_thread(build_pipeline, config)
+            cleanup.push_async_callback(asyncio.to_thread, service.workers.close)
+            cleanup.push_async_callback(service.gateway.close)
+            application.state.pipeline = service
+            application.state.slots = asyncio.Semaphore(config.max_concurrent_requests)
+            application.state.upload_slots = asyncio.Semaphore(config.max_concurrent_uploads)
+            application.state.rate_windows = defaultdict(deque)
+            yield
 
     application = FastAPI(title="Evidence RAG", version="1.0.0", lifespan=lifespan)
     application.add_middleware(IngressMiddleware)
@@ -2779,6 +2872,10 @@ def create_app(
             },
             status_code=422,
         )
+
+    @application.exception_handler(DocumentAccessDenied)
+    async def permission_error(_request: Request, _exc: DocumentAccessDenied):
+        return JSONResponse({"detail": "Document access denied"}, status_code=403)
 
     @application.exception_handler(ValueError)
     async def invalid_data(_request: Request, _exc: ValueError):
@@ -2860,9 +2957,7 @@ def create_app(
         principal: Annotated[Principal, Depends(require("ingest"))],
         service: Annotated[RAGPipeline, Depends(pipeline_dependency)],
     ):
-        count = await service.workers.run(
-            service.store.delete, document_id, principal.tenant, timeout=5
-        )
+        count = await service.workers.run(service.store.delete, document_id, principal, timeout=5)
         return {"deleted_chunks": count}
 
     @application.get("/reviews")

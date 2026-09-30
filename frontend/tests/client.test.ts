@@ -65,3 +65,30 @@ describe('state and content safety', () => {
     expect(IngestSchema.safeParse({ ...SAMPLE_DOCUMENTS, tenant: 'other' }).success).toBe(false);
   });
 });
+
+describe('request lifecycle resilience', () => {
+  it('does not start transport for a cancelled request', async () => {
+    const controller = new AbortController(); controller.abort();
+    const fetch = vi.fn(); vi.stubGlobal('fetch', fetch);
+    await expect(new ApiClient('').health(controller.signal)).rejects.toHaveProperty('name', 'AbortError');
+    expect(fetch).not.toHaveBeenCalled();
+  });
+  it('rejects a late response even if transport ignores cancellation', async () => {
+    let resolve!: (response: Response) => void;
+    vi.stubGlobal('fetch', vi.fn(() => new Promise<Response>(done => { resolve = done; })));
+    const controller = new AbortController();
+    const result = new ApiClient('').health(controller.signal);
+    controller.abort();
+    resolve(new Response(JSON.stringify({ status: 'ready', mode: 'live' })));
+    await expect(result).rejects.toHaveProperty('name', 'AbortError');
+  });
+  it('preserves timeout errors for a late success response', async () => {
+    vi.useFakeTimers();
+    let resolve!: (response: Response) => void;
+    vi.stubGlobal('fetch', vi.fn(() => new Promise<Response>(done => { resolve = done; })));
+    const result = new ApiClient('').health();
+    await vi.advanceTimersByTimeAsync(5001);
+    resolve(new Response(JSON.stringify({ status: 'ready', mode: 'live' })));
+    await expect(result).rejects.toThrow('timed out');
+  });
+});

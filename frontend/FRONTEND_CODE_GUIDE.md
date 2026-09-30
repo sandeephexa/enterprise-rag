@@ -198,7 +198,8 @@ export type Hit = z.infer<typeof HitSchema>;
 export type Review = z.infer<typeof ReviewSchema>;
 export type IngestBatch = z.infer<typeof IngestSchema>;
 export const PIPELINE_REVISION = 'source-selection-v1';
-export type Health = { status: string; mode: 'live' | 'demo'; pipeline_revision?: string; answer_style?: 'extractive' | 'synthesis' };
+export const HealthSchema = z.object({ status: z.string(), mode: z.enum(['live', 'demo']), pipeline_revision: z.string().optional(), answer_style: z.enum(['extractive', 'synthesis']).optional() });
+export type Health = z.infer<typeof HealthSchema>;
 
 ```
 
@@ -235,7 +236,7 @@ export function validateFile(file: Pick<File, 'name' | 'size'>, limits: UploadLi
 ```typescript
 import { z } from 'zod';
 import { UploadLimitsSchema, UploadResultSchema, type UploadResult } from './uploads';
-import { AnswerSchema, ReviewSchema, IngestSchema, type IngestBatch } from './schemas';
+import { AnswerSchema, ReviewSchema, IngestSchema, HealthSchema, type IngestBatch } from './schemas';
 
 export const API_BASE = (import.meta.env.VITE_API_BASE_URL || '/api').replace(/\/$/, '');
 
@@ -252,10 +253,10 @@ export class ApiClient {
   private async request<T>(path: string, schema: z.ZodType<T>, options: {
     method?: string; body?: unknown; signal?: AbortSignal; timeout?: number;
   } = {}): Promise<T> {
+    if (options.signal?.aborted) throw new DOMException('Cancelled', 'AbortError');
     const controller = new AbortController();
     const abort = () => controller.abort();
     options.signal?.addEventListener('abort', abort, { once: true });
-    if (options.signal?.aborted) controller.abort();
     let timedOut = false;
     const timer = setTimeout(() => { timedOut = true; controller.abort(); }, options.timeout ?? 35000);
     try {
@@ -265,6 +266,7 @@ export class ApiClient {
           ...(options.body !== undefined ? { 'Content-Type': 'application/json' } : {}) },
         body: options.body !== undefined ? JSON.stringify(options.body) : undefined,
       });
+      if (controller.signal.aborted) throw new DOMException('Cancelled', 'AbortError');
       if (!response.ok) {
         const retry = response.headers.get('retry-after');
         const messages: Record<number, string> = {
@@ -282,6 +284,7 @@ export class ApiClient {
       let data: unknown;
       try { data = await response.json(); }
       catch { throw new ApiError('The API returned a non-JSON response. Check the API URL and proxy.'); }
+      if (controller.signal.aborted) throw new DOMException('Cancelled', 'AbortError');
       const parsed = schema.safeParse(data);
       if (!parsed.success) throw new ApiError('The API response does not match this workbench’s contract. Check backend versions.');
       return parsed.data;
@@ -300,7 +303,7 @@ export class ApiClient {
     return this.request('/query', AnswerSchema, { method: 'POST', body: { text }, signal });
   }
   health(signal?: AbortSignal) {
-    return this.request('/health/ready', z.object({ status: z.string(), mode: z.enum(['live', 'demo']), pipeline_revision: z.string().optional(), answer_style: z.enum(['extractive', 'synthesis']).optional() }), { signal, timeout: 5000 });
+    return this.request('/health/ready', HealthSchema, { signal, timeout: 5000 });
   }
   ingest(batch: IngestBatch, signal?: AbortSignal) {
     const body = IngestSchema.parse(batch);
@@ -321,6 +324,8 @@ export class ApiClient {
         if (settled) return;
         settled = true;
         signal.removeEventListener('abort', abort);
+        xhr.onload = xhr.onerror = xhr.onabort = xhr.ontimeout = null;
+        xhr.upload.onprogress = xhr.upload.onload = null;
         if (error) reject(error); else resolve(result!);
       };
       xhr.open('POST', `${this.base}/ingest/file`);
@@ -365,7 +370,8 @@ export class ApiClient {
       body.append('groups', JSON.stringify(groups));
       if (documentId.trim()) body.append('document_id', documentId.trim());
       // The browser supplies the multipart boundary; do not set Content-Type.
-      xhr.send(body);
+      try { xhr.send(body); }
+      catch { finish(undefined, new ApiError('Could not start the upload. Check the API URL and connection.')); }
     });
   }
   reviews(signal?: AbortSignal) { return this.request('/reviews', z.array(ReviewSchema), { signal }); }
@@ -580,7 +586,7 @@ export function Playground({ state, authenticated, onConnect, onCitation }: {
 ## `src/components/Inspector.tsx`
 
 ```tsx
-import { useEffect, useRef, useState } from 'react';
+import { memo, useEffect, useRef, useState } from 'react';
 import { ArrowUpRight, FileText, ScanSearch, Timer, Fingerprint } from 'lucide-react';
 import type { Answer, Citation } from '../api/schemas';
 import { Badge, CopyButton, duration, safeSource, Skeleton, usd } from './ui';
@@ -590,11 +596,14 @@ function Highlight({ text, quote }: { text: string; quote?: string }) {
   return <p className="whitespace-pre-wrap break-words leading-7">{start < 0 || !quote ? text : <>{text.slice(0, start)}<mark>{quote}</mark>{text.slice(start + quote.length)}</>}</p>;
 }
 
-export function Inspector({ answer, pending, citation }: { answer?: Answer; pending?: boolean; citation?: Citation | null }) {
+export const Inspector = memo(function Inspector({ answer, pending, citation }: { answer?: Answer; pending?: boolean; citation?: Citation | null }) {
   const [tab, setTab] = useState<'evidence' | 'metrics'>('evidence');
   const focused = useRef<HTMLDivElement>(null);
   useEffect(() => {
-    if (citation) { setTab('evidence'); requestAnimationFrame(() => focused.current?.scrollIntoView({ behavior: 'smooth', block: 'nearest' })); }
+    if (!citation) return;
+    setTab('evidence');
+    const frame = requestAnimationFrame(() => focused.current?.scrollIntoView({ behavior: 'smooth', block: 'nearest' }));
+    return () => cancelAnimationFrame(frame);
   }, [citation]);
   const stages = Object.entries(answer?.stage_ms ?? {});
   const totalStages = Math.max(1, stages.reduce((sum, [, ms]) => sum + ms, 0));
@@ -622,13 +631,13 @@ export function Inspector({ answer, pending, citation }: { answer?: Answer; pend
       {answer.cache_hit && <p className="text-xs leading-5 text-accent">Verified answer reused from cache. Latency and usage describe this request; no model calls were made. Citations refer to the unchanged indexed sources.</p>}
       {answer.answer_style === 'extractive' && <p className="text-xs leading-5 muted">The model selected relevant source sentences. Answer wording comes directly from the document; citations and grounding checks still apply.</p>}
       {!!answer.initial_verification_reasons?.length && <p className="text-xs leading-5 muted">Initial verification: {answer.initial_verification_reasons.map(reason => reason.replaceAll('_', ' ')).join(', ')}. See the final outcome for the result after recovery.</p>}
-      {answer.mode === 'demo'   && <p className="text-xs leading-5 muted">Demo faithfulness checks exact extracts. These results do not measure live model quality.</p>}
+      {answer.mode === 'demo' && <p className="text-xs leading-5 muted">Demo faithfulness checks exact extracts. These results do not measure live model quality.</p>}
       <section><h3 className="label mb-4">STAGE LATENCY</h3><div className="space-y-4">{stages.map(([name, ms]) => <div key={name}><div className="mb-2 flex justify-between text-xs"><span className="capitalize">{name.replaceAll('_', ' ')}</span><span className="muted tabular-nums">{duration(ms)}</span></div><div className="stage-track"><div style={{ width: `${Math.max(1, ms / totalStages * 100)}%` }} /></div></div>)}</div><p className="mt-3 text-xs muted">Share of measured stage time; excludes other overhead.</p></section>
       <section><h3 className="label mb-3">USAGE & COST</h3><dl className="metric-list"><div><dt>Input tokens</dt><dd>{answer.usage.input_tokens.toLocaleString()}</dd></div><div><dt>Output tokens</dt><dd>{answer.usage.output_tokens.toLocaleString()}</dd></div><div><dt>Provider attempts</dt><dd>{answer.usage.attempts}</dd></div><div><dt>Known model cost</dt><dd>{usd(answer.usage.known_cost_usd)}</dd></div><div><dt>Reserved uncertain cost</dt><dd>{usd(answer.usage.reserved_cost_usd)}</dd></div><div><dt>Uncertain attempts</dt><dd>{answer.usage.uncertain_attempts}</dd></div></dl><p className="mt-3 text-xs leading-5 muted">Known cost excludes local compute. Reservations are estimates, not confirmed charges.</p></section>
       <section className="border-t border-line pt-4"><h3 className="label mb-3 flex items-center gap-2"><Fingerprint size={15} /> TRACE</h3>{[['Trace ID', answer.trace_id], ['Request ID', answer.request_id]].map(([label, value]) => <div className="mb-3" key={label}><div className="flex items-center justify-between text-xs muted"><span>{label}</span><CopyButton value={value} label={`Copy ${label}`} /></div><p className="font-mono text-xs break-all">{value}</p></div>)}</section>
     </div>}
   </aside>;
-}
+});
 
 ```
 
@@ -717,8 +726,9 @@ export function FileUploadPanel({ api, authenticated, onConnect, onBusy }: {
   const controller = useRef<AbortController | null>(null);
   useEffect(() => {
     const abort = new AbortController();
+    setLimits(null);
     setLimitsError(null);
-    void api.uploadLimits(abort.signal).then(setLimits).catch(error => {
+    void api.uploadLimits(abort.signal).then(result => { if (!abort.signal.aborted) setLimits(result); }).catch(error => {
       if (!abort.signal.aborted) setLimitsError(`${errorMessage(error)} Restart the backend after installing the upload dependencies.`);
     });
     return () => abort.abort();
@@ -760,7 +770,13 @@ export function FileUploadPanel({ api, authenticated, onConnect, onBusy }: {
         update(entry.id, { status: 'uploading', progress: 0, error: undefined });
         try {
           const result = await api.uploadFile(entry.file, accessGroups, entry.documentId, progress => {
-            update(entry.id, { progress, status: progress === 100 ? 'processing' : 'uploading' });
+            if (abort.signal.aborted) return;
+            const status = progress === 100 ? 'processing' : 'uploading';
+            setEntries(previous => {
+              const current = previous.find(item => item.id === entry.id);
+              if (!current || (current.progress === progress && current.status === status)) return previous;
+              return previous.map(item => item.id === entry.id ? { ...item, progress, status } : item);
+            });
           }, abort.signal);
           update(entry.id, { status: 'indexed', result, progress: 100 });
         } catch (error) {
@@ -810,31 +826,34 @@ export function FileUploadPanel({ api, authenticated, onConnect, onBusy }: {
 ## `src/components/ReviewsPanel.tsx`
 
 ```tsx
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { Check, CheckCheck, RefreshCw, X, ShieldCheck } from 'lucide-react';
 import type { ApiClient } from '../api/client';
 import type { Review } from '../api/schemas';
 import { useRequest } from '../hooks/useRequest';
 import { Badge, Button, ErrorNotice, Skeleton } from './ui';
 import { Inspector } from './Inspector';
+import { noteForReview, type DecisionDraft } from '../reviewState';
 
 export function ReviewsPanel({ api, active, authenticated, onConnect }: { api: ApiClient; active: boolean; authenticated: boolean; onConnect: () => void }) {
   const list = useRequest<Review[]>();
   const decision = useRequest<{ recorded: true }>();
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [showAll, setShowAll] = useState(false);
-  const [note, setNote] = useState('');
+  const [draft, setDraft] = useState<DecisionDraft | null>(null);
   const [recorded, setRecorded] = useState<string | null>(null);
   const [localDecisions, setLocalDecisions] = useState<Record<string, 'approve' | 'reject'>>({});
   const deciding = useRef(false);
   const refresh = () => list.execute(signal => api.reviews(signal));
   useEffect(() => { if (active && authenticated) void list.execute(signal => api.reviews(signal)); }, [active, authenticated, api, list.execute]);
-  const allRows = (list.data ?? []).map(row => localDecisions[row.request_id] ? { ...row, state: localDecisions[row.request_id] } : row);
-  const rows = allRows.filter(row => showAll || row.state === 'pending');
+  const allRows = useMemo(() => (list.data ?? []).map(row => localDecisions[row.request_id] ? { ...row, state: localDecisions[row.request_id] } : row), [list.data, localDecisions]);
+  const rows = useMemo(() => allRows.filter(row => showAll || row.state === 'pending'), [allRows, showAll]);
   const selected = rows.find(row => row.request_id === selectedId) ?? rows[0];
+  const note = noteForReview(draft, selected?.request_id);
+  const setNote = (text: string) => setDraft(selected ? { requestId: selected.request_id, text } : null);
   const changeSelection = (id: string) => { if (deciding.current) return; setSelectedId(id); setNote(''); setRecorded(null); };
   const submit = async (value: 'approve' | 'reject') => {
-    if (!selected || !note.trim() || deciding.current) return;
+    if (!selected || selected.state !== 'pending' || !note.trim() || deciding.current) return;
     deciding.current = true; setRecorded(null);
     try {
       const id = selected.request_id;
@@ -925,6 +944,18 @@ export const duration = (ms: number) => ms < 1000 ? `${ms.toFixed(0)} ms` : `${(
 export function safeSource(source: string): string | null {
   try { const url = new URL(source); return url.protocol === 'https:' ? url.href : null; }
   catch { return null; }
+}
+
+```
+
+## `src/reviewState.ts`
+
+```typescript
+export type DecisionDraft = { requestId: string; text: string };
+
+/** A refresh can change the selected record; never reuse another review's note. */
+export function noteForReview(draft: DecisionDraft | null, requestId?: string): string {
+  return draft?.requestId === requestId ? draft?.text ?? '' : '';
 }
 
 ```
@@ -1087,7 +1118,7 @@ import react from '@vitejs/plugin-react';
 import tailwindcss from '@tailwindcss/vite';
 
 export default defineConfig(({ mode }) => {
-  const env = loadEnv(mode, process.cwd(), '');
+  const env = loadEnv(mode, process.cwd(), 'API_PROXY_');
   const proxy = {
     '/api': {
       target: env.API_PROXY_TARGET || 'http://127.0.0.1:8000',
@@ -1102,6 +1133,24 @@ export default defineConfig(({ mode }) => {
     server: { port: 5173, strictPort: true, proxy },
     preview: { port: 4173, strictPort: true, proxy },
   };
+});
+
+```
+
+## `tests/reviewState.test.ts`
+
+```typescript
+import { describe, expect, it } from 'vitest';
+import { noteForReview } from '../src/reviewState';
+
+describe('decision note ownership', () => {
+  it('does not apply an old note when refresh selects a different review', () => {
+    const draft = { requestId: 'old-review', text: 'Approve this supported answer.' };
+    expect(noteForReview(draft, 'old-review')).toBe(draft.text);
+    expect(noteForReview(draft, 'new-review')).toBe('');
+    expect(noteForReview(draft, undefined)).toBe('');
+    expect(noteForReview(null, 'new-review')).toBe('');
+  });
 });
 
 ```
@@ -1174,6 +1223,33 @@ describe('state and content safety', () => {
   it('rejects duplicate document ids and client-side tenant overrides', () => {
     expect(IngestSchema.safeParse({ documents: [SAMPLE_DOCUMENTS.documents[0], SAMPLE_DOCUMENTS.documents[0]] }).success).toBe(false);
     expect(IngestSchema.safeParse({ ...SAMPLE_DOCUMENTS, tenant: 'other' }).success).toBe(false);
+  });
+});
+
+describe('request lifecycle resilience', () => {
+  it('does not start transport for a cancelled request', async () => {
+    const controller = new AbortController(); controller.abort();
+    const fetch = vi.fn(); vi.stubGlobal('fetch', fetch);
+    await expect(new ApiClient('').health(controller.signal)).rejects.toHaveProperty('name', 'AbortError');
+    expect(fetch).not.toHaveBeenCalled();
+  });
+  it('rejects a late response even if transport ignores cancellation', async () => {
+    let resolve!: (response: Response) => void;
+    vi.stubGlobal('fetch', vi.fn(() => new Promise<Response>(done => { resolve = done; })));
+    const controller = new AbortController();
+    const result = new ApiClient('').health(controller.signal);
+    controller.abort();
+    resolve(new Response(JSON.stringify({ status: 'ready', mode: 'live' })));
+    await expect(result).rejects.toHaveProperty('name', 'AbortError');
+  });
+  it('preserves timeout errors for a late success response', async () => {
+    vi.useFakeTimers();
+    let resolve!: (response: Response) => void;
+    vi.stubGlobal('fetch', vi.fn(() => new Promise<Response>(done => { resolve = done; })));
+    const result = new ApiClient('').health();
+    await vi.advanceTimersByTimeAsync(5001);
+    resolve(new Response(JSON.stringify({ status: 'ready', mode: 'live' })));
+    await expect(result).rejects.toThrow('timed out');
   });
 });
 
@@ -1250,6 +1326,30 @@ describe('upload validation and multipart client', () => {
     const abort = new AbortController(); abort.abort();
     await expect(api.uploadFile(file, ['staff'], '', vi.fn(), abort.signal)).rejects.toMatchObject({ name: 'AbortError' });
     expect(FakeXHR.latest.body).toBeUndefined();
+  });
+});
+
+describe('upload cleanup', () => {
+  it('detaches handlers after completion', async () => {
+    vi.stubGlobal('XMLHttpRequest', FakeXHR);
+    const signal = new AbortController().signal;
+    const remove = vi.spyOn(signal, 'removeEventListener');
+    const promise = new ApiClient('').uploadFile(new File(['text'], 'resume.txt'), ['staff'], '', vi.fn(), signal);
+    const xhr = FakeXHR.latest;
+    xhr.onload?.();
+    await expect(promise).resolves.toEqual(result);
+    expect(remove).toHaveBeenCalledWith('abort', expect.any(Function));
+    expect(xhr.upload.onprogress).toBeNull();
+    expect(xhr.onload).toBeNull();
+  });
+  it('cleans up a synchronous upload send failure', async () => {
+    class FailingXHR extends FakeXHR { send() { throw new Error('transport detail'); } }
+    vi.stubGlobal('XMLHttpRequest', FailingXHR);
+    const signal = new AbortController().signal;
+    const remove = vi.spyOn(signal, 'removeEventListener');
+    await expect(new ApiClient('').uploadFile(new File(['text'], 'resume.txt'), ['staff'], '', vi.fn(), signal)).rejects.toThrow('Could not start');
+    expect(remove).toHaveBeenCalledWith('abort', expect.any(Function));
+    expect(FakeXHR.latest.onerror).toBeNull();
   });
 });
 

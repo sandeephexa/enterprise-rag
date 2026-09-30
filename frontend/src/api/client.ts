@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import { UploadLimitsSchema, UploadResultSchema, type UploadResult } from './uploads';
-import { AnswerSchema, ReviewSchema, IngestSchema, type IngestBatch } from './schemas';
+import { AnswerSchema, ReviewSchema, IngestSchema, HealthSchema, type IngestBatch } from './schemas';
 
 export const API_BASE = (import.meta.env.VITE_API_BASE_URL || '/api').replace(/\/$/, '');
 
@@ -17,10 +17,10 @@ export class ApiClient {
   private async request<T>(path: string, schema: z.ZodType<T>, options: {
     method?: string; body?: unknown; signal?: AbortSignal; timeout?: number;
   } = {}): Promise<T> {
+    if (options.signal?.aborted) throw new DOMException('Cancelled', 'AbortError');
     const controller = new AbortController();
     const abort = () => controller.abort();
     options.signal?.addEventListener('abort', abort, { once: true });
-    if (options.signal?.aborted) controller.abort();
     let timedOut = false;
     const timer = setTimeout(() => { timedOut = true; controller.abort(); }, options.timeout ?? 35000);
     try {
@@ -30,6 +30,7 @@ export class ApiClient {
           ...(options.body !== undefined ? { 'Content-Type': 'application/json' } : {}) },
         body: options.body !== undefined ? JSON.stringify(options.body) : undefined,
       });
+      if (controller.signal.aborted) throw new DOMException('Cancelled', 'AbortError');
       if (!response.ok) {
         const retry = response.headers.get('retry-after');
         const messages: Record<number, string> = {
@@ -47,6 +48,7 @@ export class ApiClient {
       let data: unknown;
       try { data = await response.json(); }
       catch { throw new ApiError('The API returned a non-JSON response. Check the API URL and proxy.'); }
+      if (controller.signal.aborted) throw new DOMException('Cancelled', 'AbortError');
       const parsed = schema.safeParse(data);
       if (!parsed.success) throw new ApiError('The API response does not match this workbench’s contract. Check backend versions.');
       return parsed.data;
@@ -65,7 +67,7 @@ export class ApiClient {
     return this.request('/query', AnswerSchema, { method: 'POST', body: { text }, signal });
   }
   health(signal?: AbortSignal) {
-    return this.request('/health/ready', z.object({ status: z.string(), mode: z.enum(['live', 'demo']), pipeline_revision: z.string().optional(), answer_style: z.enum(['extractive', 'synthesis']).optional() }), { signal, timeout: 5000 });
+    return this.request('/health/ready', HealthSchema, { signal, timeout: 5000 });
   }
   ingest(batch: IngestBatch, signal?: AbortSignal) {
     const body = IngestSchema.parse(batch);
@@ -86,6 +88,8 @@ export class ApiClient {
         if (settled) return;
         settled = true;
         signal.removeEventListener('abort', abort);
+        xhr.onload = xhr.onerror = xhr.onabort = xhr.ontimeout = null;
+        xhr.upload.onprogress = xhr.upload.onload = null;
         if (error) reject(error); else resolve(result!);
       };
       xhr.open('POST', `${this.base}/ingest/file`);
@@ -130,7 +134,8 @@ export class ApiClient {
       body.append('groups', JSON.stringify(groups));
       if (documentId.trim()) body.append('document_id', documentId.trim());
       // The browser supplies the multipart boundary; do not set Content-Type.
-      xhr.send(body);
+      try { xhr.send(body); }
+      catch { finish(undefined, new ApiError('Could not start the upload. Check the API URL and connection.')); }
     });
   }
   reviews(signal?: AbortSignal) { return this.request('/reviews', z.array(ReviewSchema), { signal }); }

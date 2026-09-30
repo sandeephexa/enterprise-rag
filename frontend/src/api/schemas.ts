@@ -46,4 +46,5 @@ export type Hit = z.infer<typeof HitSchema>;
 export type Review = z.infer<typeof ReviewSchema>;
 export type IngestBatch = z.infer<typeof IngestSchema>;
 export const PIPELINE_REVISION = 'source-selection-v1';
-export type Health = { status: string; mode: 'live' | 'demo'; pipeline_revision?: string; answer_style?: 'extractive' | 'synthesis' };
+export const HealthSchema = z.object({ status: z.string(), mode: z.enum(['live', 'demo']), pipeline_revision: z.string().optional(), answer_style: z.enum(['extractive', 'synthesis']).optional() });
+export type Health = z.infer<typeof HealthSchema>;

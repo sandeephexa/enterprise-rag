@@ -158,3 +158,16 @@ This deliberately trades polished paraphrases, computed answers and synthesized 
 Answers expose `answer_style` and `initial_verification_reasons`. The workbench labels exact output as **Source sentences** and displays initial verification failures in the inspector. `/health/ready` returns `pipeline_revision: source-selection-v1` and the configured answer style. The UI warns when connected to a backend that has not loaded this revision. After restarting FastAPI, use **Check again** in the banner or refresh the page. An old API returning only status/mode has not loaded the update. No document re-ingestion is required.
 
 The private local `.env` explicitly enables extractive mode and retains the previously tested generation reasoning setting. The downloadable archive contains only safe `.env` examples. Latency remains dependent on the provider and local CPU contention; removing the repair path does not establish a guaranteed response time.
+
+
+## Production hardening, 2026-09-30
+
+Raw JSON and uploaded documents use the same storage authorization checks. New groups must be a subset of the authenticated principal's groups. Replacing or deleting an existing document requires every existing group as well, checked inside the write transaction. Read access through one shared group is insufficient for destructive changes. Use an identity holding all old/new groups for ACL migration. The internal `HybridStore.delete` method now accepts a `Principal`, not a tenant string; the HTTP contract is unchanged.
+
+Review lists now apply visibility before the 100-record cap, with deterministic ordering and an index on tenant/creation time. A stream of inaccessible records cannot hide older authorized records. Browser decision notes are bound to the selected request ID; refresh cannot apply an old note to another review.
+
+Model base URLs must be HTTPS without embedded credentials, query strings or fragments. Configuration rejects non-finite budgets/prices. Startup and shutdown release initialized telemetry and worker resources even if another cleanup operation fails. Unexpected pre-response HTTP exceptions return a redacted 500 with correlation headers and a controlled error-class audit entry. Intentional audit and usage telemetry remain enabled.
+
+Git and Docker ignore local `.env*` files and backups, with explicit exceptions for public examples and the demo test environment. `.env.backup` is removed from Git tracking but retained locally. Its inspected credential values match the supplied examples; this does not audit remote history. Rotate any real keys previously disclosed through chat, logs or repository history. Removing a tracked file does not revoke a secret or purge old commits.
+
+Remaining production boundaries: rate limits are process-local and authentication follows bounded body buffering; use gateway admission limits and shared rate enforcement before public deployment. SQLite and local model locks still constrain horizontal scale. Parser subprocesses are not OS sandboxes. Production TLS, federated identity, retention/backup drills and dependency vulnerability monitoring remain deployment work. No source-citation or NLI threshold was weakened by the performance changes.

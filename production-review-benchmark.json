@@ -1,0 +1,26 @@
+{
+  "scope": "Lexical BM25 only; includes index construction; synthetic 5000 documents x 80 tokens, 3 query variants; not end-to-end LLM latency",
+  "measurements": {
+    "original": {
+      "samples_ms": [
+        178.735,
+        171.381,
+        218.717,
+        176.096,
+        158.247
+      ],
+      "median_ms": 176.096
+    },
+    "optimized": {
+      "samples_ms": [
+        65.115,
+        60.944,
+        80.959,
+        72.021,
+        58.381
+      ],
+      "median_ms": 65.115
+    }
+  },
+  "median_reduction_percent": 63.0
+}

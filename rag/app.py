@@ -9,7 +9,7 @@ import sqlite3
 import time
 import uuid
 from collections import defaultdict, deque
-from contextlib import asynccontextmanager
+from contextlib import AsyncExitStack, asynccontextmanager
 from typing import Annotated, Any
 
 from fastapi import Depends, FastAPI, HTTPException, Request
@@ -28,7 +28,13 @@ from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapProp
 
 from .config import Settings
 from .guardrails import DemoEntailment, HallucinationGuard, NeuralEntailment, RejectedInput
-from .ingestion import DemoEncoder, EmbeddingInputTooLong, HybridStore, SemanticEncoder
+from .ingestion import (
+    DemoEncoder,
+    DocumentAccessDenied,
+    EmbeddingInputTooLong,
+    HybridStore,
+    SemanticEncoder,
+)
 from .pipeline import CPUWorkers, ModelGateway, RAGPipeline
 from .retriever import CrossEncoderRanker, DemoRanker, HybridRetriever
 from .schemas import Answer, IngestRequest, Principal, Query, ReviewDecision
@@ -124,6 +130,7 @@ class IngressMiddleware:
         headers = {k.decode("latin1"): v.decode("latin1") for k, v in scope.get("headers", [])}
         parent = TraceContextTextMapPropagator().extract(headers)
         status = 500
+        response_started = False
         is_upload = path == "/ingest/file"
         body_limit = settings.max_upload_bytes + 65536 if is_upload else settings.max_body_bytes
         upload_slot = False
@@ -136,8 +143,9 @@ class IngressMiddleware:
         ) as span:
 
             async def wrapped_send(message: dict) -> None:
-                nonlocal status
+                nonlocal status, response_started
                 if message["type"] == "http.response.start":
+                    response_started = True
                     status = message["status"]
                     message["headers"] = list(message.get("headers", [])) + [
                         (b"x-request-id", request_id.encode()),
@@ -191,6 +199,22 @@ class IngressMiddleware:
                 await self.app(scope, replay, wrapped_send)
             except TimeoutError:
                 await JSONResponse({"detail": "Request timed out"}, status_code=408)(
+                    scope, receive, wrapped_send
+                )
+            except Exception as exc:
+                LOGGER.error(
+                    json.dumps(
+                        {
+                            "event": "http_error",
+                            "request_id": request_id,
+                            "trace_id": f"{span.get_span_context().trace_id:032x}",
+                            "error_type": type(exc).__name__,
+                        }
+                    )
+                )
+                if response_started:
+                    raise
+                await JSONResponse({"detail": "Internal service error"}, status_code=500)(
                     scope, receive, wrapped_send
                 )
             finally:
@@ -271,18 +295,18 @@ def create_app(
     async def lifespan(application: FastAPI):
         config = settings or Settings()
         application.state.settings = config
-        providers = configure_telemetry(config) if telemetry else ()
-        application.state.pipeline = pipeline or await asyncio.to_thread(build_pipeline, config)
-        application.state.slots = asyncio.Semaphore(config.max_concurrent_requests)
-        application.state.upload_slots = asyncio.Semaphore(config.max_concurrent_uploads)
-        application.state.rate_windows = defaultdict(deque)
-        try:
-            yield
-        finally:
-            await application.state.pipeline.gateway.close()
-            await asyncio.to_thread(application.state.pipeline.workers.close)
+        async with AsyncExitStack() as cleanup:
+            providers = configure_telemetry(config) if telemetry else ()
             for provider in providers:
-                await asyncio.to_thread(provider.shutdown)
+                cleanup.push_async_callback(asyncio.to_thread, provider.shutdown)
+            service = pipeline or await asyncio.to_thread(build_pipeline, config)
+            cleanup.push_async_callback(asyncio.to_thread, service.workers.close)
+            cleanup.push_async_callback(service.gateway.close)
+            application.state.pipeline = service
+            application.state.slots = asyncio.Semaphore(config.max_concurrent_requests)
+            application.state.upload_slots = asyncio.Semaphore(config.max_concurrent_uploads)
+            application.state.rate_windows = defaultdict(deque)
+            yield
 
     application = FastAPI(title="Evidence RAG", version="1.0.0", lifespan=lifespan)
     application.add_middleware(IngressMiddleware)
@@ -306,6 +330,10 @@ def create_app(
             },
             status_code=422,
         )
+
+    @application.exception_handler(DocumentAccessDenied)
+    async def permission_error(_request: Request, _exc: DocumentAccessDenied):
+        return JSONResponse({"detail": "Document access denied"}, status_code=403)
 
     @application.exception_handler(ValueError)
     async def invalid_data(_request: Request, _exc: ValueError):
@@ -387,9 +415,7 @@ def create_app(
         principal: Annotated[Principal, Depends(require("ingest"))],
         service: Annotated[RAGPipeline, Depends(pipeline_dependency)],
     ):
-        count = await service.workers.run(
-            service.store.delete, document_id, principal.tenant, timeout=5
-        )
+        count = await service.workers.run(service.store.delete, document_id, principal, timeout=5)
         return {"deleted_chunks": count}
 
     @application.get("/reviews")

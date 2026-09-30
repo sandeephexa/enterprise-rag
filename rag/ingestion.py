@@ -189,6 +189,10 @@ class Chunker:
         return chunks
 
 
+class DocumentAccessDenied(PermissionError):
+    """The principal cannot assign or mutate the document access groups."""
+
+
 class HybridStore:
     """SQLite vector store + persisted lexical postings for bounded enterprise corpora.
 
@@ -214,6 +218,10 @@ class HybridStore:
                     payload TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'pending',
                     decision TEXT, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
             """)
+            db.execute(
+                "CREATE INDEX IF NOT EXISTS reviews_tenant_created "
+                "ON reviews(tenant,created_at DESC,request_id DESC)"
+            )
             identity = "schema-v1:" + encoder.identity
             row = db.execute("SELECT value FROM metadata WHERE key='identity'").fetchone()
             if row and row[0] != identity:
@@ -234,10 +242,14 @@ class HybridStore:
         """Build everything before one transaction; failure preserves the previous index."""
         from .guardrails import validate_document
 
+        allowed_groups = set(principal.groups)
+        chunker = Chunker(self.settings, self.encoder)
         chunks: list[Chunk] = []
         for document in documents:
+            if not set(document.groups).issubset(allowed_groups):
+                raise DocumentAccessDenied("Document access denied")
             validate_document(document)
-            chunks.extend(Chunker(self.settings, self.encoder).split(document, principal.tenant))
+            chunks.extend(chunker.split(document, principal.tenant))
         if not chunks:
             raise ValueError("No indexable content")
         vectors = self.encoder.encode([chunk.text for chunk in chunks])
@@ -246,6 +258,7 @@ class HybridStore:
         with self.connect() as db:
             db.execute("BEGIN IMMEDIATE")
             for document in documents:
+                self._authorize_mutation(db, document.id, principal)
                 db.execute(
                     "DELETE FROM chunks WHERE tenant=? AND document_id=?",
                     (principal.tenant, document.id),
@@ -298,22 +311,37 @@ class HybridStore:
                 (principal.tenant,),
             ).fetchall()
         chunks, vectors, tokens = [], [], []
+        allowed_groups = set(principal.groups)
         for payload, vector, lexical in rows:
             chunk = Chunk.model_validate_json(payload)
-            if set(chunk.groups).intersection(principal.groups):
+            if allowed_groups.intersection(chunk.groups):
                 chunks.append(chunk)
-                vectors.append(np.frombuffer(vector, dtype=np.float32).copy())
+                vectors.append(np.frombuffer(vector, dtype=np.float32))
                 tokens.append(json.loads(lexical))
         return chunks, np.stack(vectors) if vectors else np.empty((0, 0), dtype=np.float32), tokens
 
-    def delete(self, document_id: str, tenant: str) -> int:
+    @staticmethod
+    def _authorize_mutation(db: sqlite3.Connection, document_id: str, principal: Principal) -> None:
+        """Require authority over every existing group, within the write transaction."""
+        allowed = set(principal.groups)
+        rows = db.execute(
+            "SELECT payload FROM chunks WHERE tenant=? AND document_id=?",
+            (principal.tenant, document_id),
+        )
+        for (payload,) in rows:
+            if not set(json.loads(payload)["groups"]).issubset(allowed):
+                raise DocumentAccessDenied("Document access denied")
+
+    def delete(self, document_id: str, principal: Principal) -> int:
         with self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            self._authorize_mutation(db, document_id, principal)
             count = db.execute(
                 "DELETE FROM chunks WHERE tenant=? AND document_id=?",
-                (tenant, document_id),
+                (principal.tenant, document_id),
             ).rowcount
             if count:
-                self._bump_revision(db, tenant)
+                self._bump_revision(db, principal.tenant)
             return count
 
     def save_review(
@@ -345,22 +373,29 @@ class HybridStore:
             )
 
     def reviews(self, principal: Principal) -> list[dict]:
+        """Return the newest 100 authorized records without materializing the full queue."""
+        allowed = set(principal.groups)
+        records = []
         with self.connect() as db:
             rows = db.execute(
-                "SELECT request_id,groups_json,payload,state,decision FROM reviews WHERE tenant=? ORDER BY created_at DESC LIMIT 100",
+                "SELECT request_id,groups_json,payload,state,decision FROM reviews "
+                "WHERE tenant=? ORDER BY created_at DESC,request_id DESC",
                 (principal.tenant,),
-            ).fetchall()
-        # Require all originating groups to avoid exposing combined-context reviews.
-        return [
-            {
-                "request_id": rid,
-                "answer": json.loads(payload),
-                "state": state,
-                "decision": json.loads(decision) if decision else None,
-            }
-            for rid, groups, payload, state, decision in rows
-            if set(json.loads(groups)).issubset(principal.groups)
-        ]
+            )
+            for rid, groups, payload, state, decision in rows:
+                if not set(json.loads(groups)).issubset(allowed):
+                    continue
+                records.append(
+                    {
+                        "request_id": rid,
+                        "answer": json.loads(payload),
+                        "state": state,
+                        "decision": json.loads(decision) if decision else None,
+                    }
+                )
+                if len(records) == 100:
+                    break
+        return records
 
     def decide(self, request_id: str, decision: ReviewDecision, principal: Principal) -> bool:
         with self.connect() as db:

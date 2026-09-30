@@ -81,10 +81,11 @@ async def test_cache_invalidates_on_update_delete_and_acl_change(pipeline, docum
     )
     result = await pipeline.run(query, principal)
     assert not result.cache_hit and "12" in result.answer
-    pipeline.store.ingest([document.model_copy(update={"groups": ["restricted"]})], principal)
+    admin = principal.model_copy(update={"groups": ["staff", "restricted"]})
+    pipeline.store.ingest([document.model_copy(update={"groups": ["restricted"]})], admin)
     hidden = await pipeline.run(query, principal)
     assert not hidden.cache_hit and not hidden.contexts
-    pipeline.store.delete(document.id, principal.tenant)
+    pipeline.store.delete(document.id, admin)
     assert not (await pipeline.run(query, principal)).cache_hit
 
 
@@ -147,7 +148,7 @@ def test_revision_is_atomic_and_shared_across_store_instances(settings, document
     with pytest.raises(ValueError, match="capacity"):
         store.ingest([document.model_copy(update={"text": document.text * 30})], principal)
     assert second.revision(principal.tenant) == 1
-    store.delete(document.id, principal.tenant)
+    store.delete(document.id, principal)
     assert second.revision(principal.tenant) == 2
     assert second.revision("other") == 0
 

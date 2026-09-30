@@ -1,28 +1,31 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { Check, CheckCheck, RefreshCw, X, ShieldCheck } from 'lucide-react';
 import type { ApiClient } from '../api/client';
 import type { Review } from '../api/schemas';
 import { useRequest } from '../hooks/useRequest';
 import { Badge, Button, ErrorNotice, Skeleton } from './ui';
 import { Inspector } from './Inspector';
+import { noteForReview, type DecisionDraft } from '../reviewState';
 
 export function ReviewsPanel({ api, active, authenticated, onConnect }: { api: ApiClient; active: boolean; authenticated: boolean; onConnect: () => void }) {
   const list = useRequest<Review[]>();
   const decision = useRequest<{ recorded: true }>();
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [showAll, setShowAll] = useState(false);
-  const [note, setNote] = useState('');
+  const [draft, setDraft] = useState<DecisionDraft | null>(null);
   const [recorded, setRecorded] = useState<string | null>(null);
   const [localDecisions, setLocalDecisions] = useState<Record<string, 'approve' | 'reject'>>({});
   const deciding = useRef(false);
   const refresh = () => list.execute(signal => api.reviews(signal));
   useEffect(() => { if (active && authenticated) void list.execute(signal => api.reviews(signal)); }, [active, authenticated, api, list.execute]);
-  const allRows = (list.data ?? []).map(row => localDecisions[row.request_id] ? { ...row, state: localDecisions[row.request_id] } : row);
-  const rows = allRows.filter(row => showAll || row.state === 'pending');
+  const allRows = useMemo(() => (list.data ?? []).map(row => localDecisions[row.request_id] ? { ...row, state: localDecisions[row.request_id] } : row), [list.data, localDecisions]);
+  const rows = useMemo(() => allRows.filter(row => showAll || row.state === 'pending'), [allRows, showAll]);
   const selected = rows.find(row => row.request_id === selectedId) ?? rows[0];
+  const note = noteForReview(draft, selected?.request_id);
+  const setNote = (text: string) => setDraft(selected ? { requestId: selected.request_id, text } : null);
   const changeSelection = (id: string) => { if (deciding.current) return; setSelectedId(id); setNote(''); setRecorded(null); };
   const submit = async (value: 'approve' | 'reject') => {
-    if (!selected || !note.trim() || deciding.current) return;
+    if (!selected || selected.state !== 'pending' || !note.trim() || deciding.current) return;
     deciding.current = true; setRecorded(null);
     try {
       const id = selected.request_id;
