@@ -1,0 +1,28 @@
+{
+  "checked_at": "2026-09-30T08:53:49.405426+00:00",
+  "traffic": "Nine GET /health/ready requests; no LLM requests or latency benchmark",
+  "targets": [
+    {
+      "job": "rag-otel",
+      "health": "up",
+      "last_error": ""
+    }
+  ],
+  "monitor_api": {
+    "calls": {
+      "series": 1,
+      "finite_points": 61,
+      "positive_points": 14
+    },
+    "errors": {
+      "series": 1,
+      "finite_points": 61,
+      "positive_points": 0
+    },
+    "latencies": {
+      "series": 1,
+      "finite_points": 14,
+      "positive_points": 14
+    }
+  }
+}

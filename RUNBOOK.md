@@ -24,6 +24,31 @@ Documents can be supplied as text/Markdown JSON or authenticated multipart PDF, 
 
 Input patterns target obvious instruction injection and credential exfiltration. They are not a universal moderation classifier. Deploy content policies appropriate to your data and jurisdiction. NLI is English-focused and does not certify factual accuracy, policy correctness or source freshness.
 
+## Local Jaeger Monitor charts
+
+From the project directory, start all three monitoring services (the API may keep running on the host):
+
+```bash
+docker compose up -d collector jaeger prometheus
+```
+
+The host API must have `RAG_OTLP_ENDPOINT=http://127.0.0.1:4318` in its environment; restart the API only if changing that setting. The containerized API already points at `http://collector:4318` through Compose.
+
+Open http://127.0.0.1:16686/monitor, refresh the page, select `evidence-rag` and a recent time range such as Last 15 minutes. Run several workbench queries, then allow roughly 30–60 seconds for export, the 5-second span-metrics flush and multiple 15-second Prometheus scrapes. With no recent traffic, rate charts can be zero and latency charts can have gaps. Older traces do not backfill metrics.
+
+The collector sends traces to Jaeger and to the spanmetrics connector. The connector produces `traces_span_metrics_calls_total` and `traces_span_metrics_duration_milliseconds_*`; Prometheus scrapes them and Jaeger reads them for service request-rate, error-rate and duration charts. Jaeger is explicitly configured with the matching namespace, duration unit and Prometheus name normalization. Trace search working by itself does not imply this metrics path is enabled. See the [pinned spanmetrics connector documentation](https://github.com/open-telemetry/opentelemetry-collector-contrib/tree/v0.123.0/connector/spanmetricsconnector).
+
+Validation points:
+
+- `docker compose ps`: collector, jaeger and prometheus are running.
+- http://127.0.0.1:9090/targets: `rag-otel` is UP.
+- http://127.0.0.1:16686/api/metrics/calls?service=evidence-rag&lookback=900000: metrics contain points after traffic. For latency, use `/api/metrics/latencies?service=evidence-rag&lookback=900000&quantile=0.95`.
+- The Monitor landing page means the metrics backend is unavailable or disabled; inspect `docker compose logs --tail=100 collector jaeger prometheus`. An enabled dashboard with empty charts usually needs fresh traffic, a wider time window or a healthy scrape target.
+
+HTTP health checks also create service spans, so their latency is not representative of RAG queries. This application's HTTP span operation is `http.request`; use individual `rag.query` traces and the application latency metric below to assess pipeline performance. Abstention/review with HTTP 200 is not an HTTP error; use application outcome metrics to monitor answer quality. Token and cost metrics are available in Prometheus, not automatically shown in Jaeger's RED charts.
+
+Recreating Jaeger clears its in-memory trace history. The supplied development stack has no durable telemetry retention; use persistent storage for long-term monitoring.
+
 ## Useful monitoring queries
 
 Collector's default Prometheus name translation turns dots into underscores and adds counter suffixes. Verify exported names on your collector version before installing alerts.

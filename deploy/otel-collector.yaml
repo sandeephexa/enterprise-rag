@@ -8,6 +8,14 @@ processors:
     check_interval: 1s
     limit_mib: 256
   batch: {}
+connectors:
+  spanmetrics:
+    namespace: traces.span.metrics
+    metrics_flush_interval: 5s
+    histogram:
+      unit: ms
+      explicit:
+        buckets: [10ms, 50ms, 100ms, 250ms, 500ms, 1s, 2s, 3s, 5s, 8s, 10s, 15s, 30s]
 exporters:
   otlp/jaeger:
     endpoint: jaeger:4317
@@ -20,8 +28,8 @@ service:
     traces:
       receivers: [otlp]
       processors: [memory_limiter, batch]
-      exporters: [otlp/jaeger]
+      exporters: [otlp/jaeger, spanmetrics]
     metrics:
-      receivers: [otlp]
+      receivers: [otlp, spanmetrics]
       processors: [memory_limiter, batch]
       exporters: [prometheus]

@@ -13,7 +13,7 @@ Validation performed on macOS ARM64 with Python 3.12.14. Dependency versions are
 
 ## Initial validation boundaries
 
-During initial delivery, no real generator or judge endpoint was called: no API credentials were provided. Later live regression checks are recorded below. HTTP contracts, retry behavior and the live orchestration path were exercised with controlled HTTP transports. The Docker/Compose stack was not launched because Docker is unavailable in this environment. External OTLP collector export, Linux container behavior, accelerator behavior, production-scale load, backup restoration and enterprise-corpus quality calibration remain deployment acceptance work.
+During initial delivery, no real generator or judge endpoint was called: no API credentials were provided. Later live regression checks are recorded below. HTTP contracts, retry behavior and the live orchestration path were exercised with controlled HTTP transports. At initial delivery, Docker was unavailable and the Compose stack and external OTLP export were not tested. The later monitoring validation below supersedes that limitation for the local observation stack. Application Linux container behavior, accelerator behavior, production-scale load, backup restoration and enterprise-corpus quality calibration remain deployment acceptance work.
 
 ## Reproduce
 
@@ -104,3 +104,12 @@ The delivered document-Q&A profile selects complete source sentences, constructs
 Final live regression: eight runs with the application answer cache disabled, covering three exact repetitions, two paraphrases, a designation lookup and two absent facts. All eight met their expected answer/abstention outcome. All released claims used exact source wording and authentic citations. No run needed answer repair or human review. Median pipeline latency was 3.07 seconds; observed range 1.46–3.68 seconds. Output was 19–29 provider tokens. See selection-regression.json for every sample, including slow ones. Provider-side caching cannot be ruled out for repeated prompts, so these are not independent fresh-prompt production percentiles.
 
 The live corpus was copied using SQLite backup into a temporary database; no live documents were changed. The existing port-8000 service still returned the old health contract at the end of validation and must be restarted. Testing proves the reported path on these examples, not universal correctness, relevance, recall or a guaranteed latency bound. Broader labeled evaluation is still required for synthesized answers, calculations, complex multi-document questions and additional languages.
+
+
+## Jaeger Monitor validation, 2026-09-30
+
+Enabled spanmetrics in Collector 0.123.0 and configured Jaeger 1.66.0 to query Prometheus 3.2.1 with matching normalized metric names and millisecond histogram units. All three monitoring containers were started successfully. Compose configuration validation and the collector's own configuration validator passed.
+
+Sent nine successful readiness requests through the existing host API. Prometheus reports the rag-otel scrape target UP; Jaeger's calls and p95 latency APIs return finite, positive points for evidence-rag, and its errors API returns finite points. See monitoring-smoke.json for the bounded validation summary. This verifies real API → OTLP collector → spanmetrics → Prometheus → Jaeger Monitor API delivery. Browser chart rendering was not separately inspected. Health traffic is not an LLM or RAG latency benchmark, and no paid model call was needed.
+
+The previous Jaeger traces were saved locally before recreating its ephemeral container; that sensitive backup is excluded from the deliverable. Metrics begin with new traffic and are not reconstructed from historical traces. The API, indexed documents and frontend were not restarted or changed for this fix.
