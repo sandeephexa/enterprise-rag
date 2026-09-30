@@ -8,3 +8,7 @@ data/
 eval-report.json
 .cache/
 *.egg-info/
+
+.env.backup
+*.pyc
+*.json
